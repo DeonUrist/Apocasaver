@@ -6,6 +6,7 @@ using System.Text;
 using BepInEx;
 using BepInEx.Configuration;
 using BepInEx.Logging;
+using HarmonyLib;
 using HutongGames.PlayMaker;
 using UnityEngine;
 using UnityEngine.SceneManagement;
@@ -17,11 +18,12 @@ namespace Apocasaver
     {
         public const string GUID = "com.denis.apocalypter.apocasaver";
         public const string NAME = "Apocasaver";
-        public const string VERSION = "1.3.0";
+        public const string VERSION = "1.4.0";
 
         internal static ManualLogSource Log;
         internal static ConfigEntry<bool> Enabled;
         internal static ConfigEntry<float> IntervalMinutes;
+        internal static ConfigEntry<bool> KeepHeldItem, SaveFix, MenuClickFix, VerboseHeld;
         private static GameObject _runnerGo;
 
         private void Awake()
@@ -33,6 +35,14 @@ namespace Apocasaver
                 new ConfigDescription("Minutes between autosaves. The game is saved over the slot this character was last saved to (or loaded from). " +
                                       "If you are in a vehicle when the time is up, the autosave happens as soon as you get out.",
                                       new AcceptableValueRange<float>(1f, 120f)));
+
+            KeepHeldItem = Config.Bind("HeldItem", "KeepHeldItem", true, "Remember the item in your hand when the game is saved and put it back in your hand after loading.");
+            SaveFix = Config.Bind("HeldItem", "SaveFix", true, "Fix the vanilla bug where an item saved while held falls through the world after loading (its colliders are made solid for the duration of the save).");
+            MenuClickFix = Config.Bind("HeldItem", "MenuClickFix", true, "Fix the vanilla bug where clicking any pause-menu button (e.g. Save) drops the item in your hand.");
+            VerboseHeld = Config.Bind("HeldItem", "VerboseLog", false, "Log the held-item bookkeeping in detail.");
+
+            try { new Harmony(GUID).PatchAll(typeof(Plugin).Assembly); }
+            catch (Exception e) { Logger.LogError("Harmony patching failed (held-item fixes inactive): " + e); }
 
             SceneManager.sceneLoaded += OnSceneLoaded;
             EnsureRunner("Awake");
@@ -83,6 +93,7 @@ namespace Apocasaver
         {
             float now = Time.realtimeSinceStartup;
             StatusLabel.Tick();
+            try { HeldItemKeeper.Tick(); } catch (Exception e) { if (Time.frameCount % 600 == 0) Plugin.Log.LogWarning("HeldItemKeeper: " + e.Message); }
             if (now >= _nextScan) { _nextScan = now + 1f; Scan(); }
             if (!Alive(_saveLoad)) { Disarm("SaveLoadGame gone"); _lastState = ""; return; }
 
