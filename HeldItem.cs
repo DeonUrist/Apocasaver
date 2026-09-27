@@ -284,6 +284,7 @@ namespace Apocasaver
             foreach (var f in Resources.FindObjectsOfTypeAll<PlayMakerFSM>())
                 if (f != null && f.FsmName == "saveItemVar" && f.gameObject.name == _restoreName && f.gameObject.scene.IsValid()) { item = f.gameObject; break; }
             if (item == null) { Plugin.Log.LogWarning("Held item " + _restoreName + " not found in the loaded world"); return; }
+            if (IsContainer(item)) { V("Not restoring " + _restoreName + ": crate/container, vanilla handling"); HandPose.QueueRaw(HandPose.HeldKey, ""); SaveStore.SaveString(SaveFileName(), HandPose.HeldKey, ""); return; }
             if (item.transform.parent != null && item.transform.parent.IsChildOf(_grab.transform)) { V("Held item " + _restoreName + " is already under the camera (slot / hand); leaving it"); return; }
             Vector3 p; Quaternion q;
             bool hasPose = HandPose.TryGet(item.name, out p, out q);
@@ -380,13 +381,58 @@ namespace Apocasaver
             if (changed && _grab != null) { V("Held-item keeper: player refs found"); ResetPerGame(); }
         }
 
+        /// The item in the hand, or null. Crates/containers report null: they carry other items inside and all of the
+        /// held-item logic (save-safe colliders, remember/restore, menu-click and camera guards) is left to the vanilla game for them.
         private static GameObject HeldItem()
+        {
+            var item = RawHeldItem();
+            if (item == null) return null;
+            if (IsContainer(item)) { if (_lastContainerWarned != item) { _lastContainerWarned = item; V("Held item " + item.name + " is a crate/container: vanilla handling"); } return null; }
+            return item;
+        }
+        private static GameObject _lastContainerWarned;
+
+        internal static GameObject RawHeldItem()
         {
             if (_grab == null || _grab.gameObject == null) return null;
             string s = SafeState(_grab);
             if (s != "ItemInHand" && s != "Rotate" && s != "Forward" && s != "Backward" && s != "Grab") return null;
             var v = _grab.FsmVariables.GetFsmGameObject("Item");
             return v != null ? v.Value : null;
+        }
+
+        /// Autosave is about to run: a held crate/container is dropped first (vanilla drop), so its contents are saved like any
+        /// items lying in the world. Returns true when a drop was issued (caller waits a moment before saving).
+        internal static bool DropHeldContainerForSave()
+        {
+            var item = RawHeldItem();
+            if (item == null || !IsContainer(item)) return false;
+            if (SafeState(_grab) != "ItemInHand") return false;   // rotating / moving it: try again next frame
+            Plugin.Log.LogInfo("Autosave: dropping held " + item.name + " (crate/container) first");
+            _grab.SendEvent("drop");
+            return true;
+        }
+
+        /// Crate / box: by prefab name (crate_*, box_cardboard...) or structurally, i.e. it has other saveable items parented inside it.
+        private static GameObject _ccItem; private static bool _ccResult; private static float _ccAt;
+        internal static bool IsContainer(GameObject item)
+        {
+            if (item == null) return false;
+            if (item == _ccItem && Time.unscaledTime - _ccAt < 0.5f) return _ccResult;   // re-checked twice a second (items can be put into a held box)
+            _ccItem = item; _ccAt = Time.unscaledTime; _ccResult = ComputeIsContainer(item);
+            return _ccResult;
+        }
+        private static bool ComputeIsContainer(GameObject item)
+        {
+            try
+            {
+                string n = item.name.ToLowerInvariant();
+                if (n.StartsWith("crate") || n.StartsWith("box_cardboard") || n.Contains("_crate")) return true;
+                foreach (var f in item.GetComponentsInChildren<PlayMakerFSM>(true))
+                    if (f != null && f.FsmName == "saveItemVar" && f.gameObject != item) return true;
+            }
+            catch { }
+            return false;
         }
 
         private static string Seed() { try { var v = _saveLoad.FsmVariables.GetFsmInt("seed"); return v != null ? v.Value.ToString() : ""; } catch { return ""; } }
@@ -433,6 +479,7 @@ namespace Apocasaver
             var fsm = __instance.Fsm;
             if (fsm == null || fsm.Name != "GrabItem") return true;
             if (!HeldItemKeeper.MenuOpen) return true;
+            if (HeldItemKeeper.IsContainer(HeldItemKeeper.RawHeldItem())) return true;   // crates: vanilla behaviour
             if (__instance.storeResult != null) __instance.storeResult.Value = false;
             return false;
         }

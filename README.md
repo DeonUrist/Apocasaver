@@ -13,6 +13,7 @@ slots so you can tell autosaves and manual saves apart.
 - Slot labels are stamped `Autosave (Seed: …) dd/MM/yyyy HH:mm` or `Manual (Seed: …) …`, with the label font auto-fit to the box.
 - On-screen status: *Autosave in 30 sec* / *15 sec* countdown (v1.5), **AUTOSAVING** while the save runs; a reminder to save at least once if the character has never been saved
   (autosave never writes to a slot that was not chosen by you).
+- Crates and boxes (anything with items inside) are excluded from all held-item handling and behave exactly as in vanilla (v1.5.2).
 - **Keeps the item in your hand across saves and loads** (v1.4): the item you are holding is recorded when the game is saved and
   put back into your hand after loading. Two vanilla bugs are fixed on the way: clicking any pause-menu button (e.g. *Save*)
   no longer drops the held item, and an item saved while held no longer falls through the world after loading (its colliders

@@ -18,7 +18,7 @@ namespace Apocasaver
     {
         public const string GUID = "com.denis.apocalypter.apocasaver";
         public const string NAME = "Apocasaver";
-        public const string VERSION = "1.5.1";
+        public const string VERSION = "1.5.2";
 
         internal static ManualLogSource Log;
         internal static ConfigEntry<bool> Enabled;
@@ -227,8 +227,17 @@ namespace Apocasaver
             return true;
         }
 
+        private float _dropWaitUntil = -1f;   // a held crate was dropped; save once it has left the hand
+
         private void TryAutosave(float now)
         {
+            // Holding a crate/box: drop it (vanilla drop) and save half a second later, so the crate and its contents are
+            // saved as world items instead of being handled by the held-item code.
+            try { if (HeldItemKeeper.DropHeldContainerForSave()) { _dropWaitUntil = now + 0.5f; return; } }
+            catch (Exception e) { Plugin.Log.LogWarning("Crate drop before autosave failed: " + e.Message); }
+            if (now < _dropWaitUntil) return;
+            _dropWaitUntil = -1f;
+
             string file = SaveFileName();
             Plugin.Log.LogInfo("Autosaving to " + file + " ...");
             try
