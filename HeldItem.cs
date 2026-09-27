@@ -142,6 +142,34 @@ namespace Apocasaver
         }
     }
 
+    /// Vehicle parts (cassette, radio, headlight...) carry a CheckTag FSM whose start state reparents the object to the scene
+    /// root. Switching the vehicle camera deactivates PlayerCamera; when it comes back PlayMaker restarts every FSM on the
+    /// re-enabled objects (RestartOnEnable), so a held vehicle part is thrown out of the hand. While an item is in the hand the
+    /// restart is switched off for the FSMs whose start path has side effects, and restored when it leaves.
+    internal static class RestartGuard
+    {
+        private static readonly string[] Fsms = { "CheckTag", "LockPhysics" };
+        private static GameObject _guarded;
+
+        internal static void Track(GameObject held)
+        {
+            if (held == _guarded) return;
+            Set(_guarded, false);
+            _guarded = held;
+            Set(held, true);
+        }
+
+        internal static void Set(GameObject item, bool guarded)
+        {
+            if (item == null) return;
+            foreach (var f in item.GetComponents<PlayMakerFSM>())
+            {
+                if (f == null || f.Fsm == null || Array.IndexOf(Fsms, f.FsmName) < 0) continue;
+                f.Fsm.RestartOnEnable = !guarded;
+            }
+        }
+    }
+
     /// Drives the held-item logic; ticked every frame by Apocasaver's Runner.
     internal static class HeldItemKeeper
     {
@@ -172,6 +200,7 @@ namespace Apocasaver
 
             // Remember what is in the hand (deliberate drop/throw forgets it).
             var h = HeldItem();
+            if (Plugin.VehiclePartFix.Value) RestartGuard.Track(h); else RestartGuard.Track(null);
             if (h != null && h.transform.parent != null) { _lastHeld = h; _lastPos = h.transform.localPosition; _lastRot = h.transform.localRotation; }
             else if (h == null && _lastHeld != null)
             {

@@ -18,13 +18,12 @@ namespace Apocasaver
     {
         public const string GUID = "com.denis.apocalypter.apocasaver";
         public const string NAME = "Apocasaver";
-        public const string VERSION = "1.5.0";
+        public const string VERSION = "1.4.1";
 
         internal static ManualLogSource Log;
         internal static ConfigEntry<bool> Enabled;
         internal static ConfigEntry<float> IntervalMinutes;
-        internal static ConfigEntry<int> WarningSeconds;
-        internal static ConfigEntry<bool> KeepHeldItem, SaveFix, MenuClickFix, VerboseHeld;
+        internal static ConfigEntry<bool> KeepHeldItem, SaveFix, MenuClickFix, VehiclePartFix, VerboseHeld;
         private static GameObject _runnerGo;
 
         private void Awake()
@@ -36,13 +35,11 @@ namespace Apocasaver
                 new ConfigDescription("Minutes between autosaves. The game is saved over the slot this character was last saved to (or loaded from). " +
                                       "If you are in a vehicle when the time is up, the autosave happens as soon as you get out.",
                                       new AcceptableValueRange<float>(1f, 120f)));
-            WarningSeconds = Config.Bind("General", "Autosave warning (sec)", 30,
-                new ConfigDescription("Show \"Autosave in X sec\" this many seconds before an autosave, then again every 15 seconds. 0 = no warning.",
-                                      new AcceptableValueRange<int>(0, 300)));
 
             KeepHeldItem = Config.Bind("HeldItem", "KeepHeldItem", true, "Remember the item in your hand when the game is saved and put it back in your hand after loading.");
             SaveFix = Config.Bind("HeldItem", "SaveFix", true, "Fix the vanilla bug where an item saved while held falls through the world after loading (its colliders are made solid for the duration of the save).");
             MenuClickFix = Config.Bind("HeldItem", "MenuClickFix", true, "Fix the vanilla bug where clicking any pause-menu button (e.g. Save) drops the item in your hand.");
+            VehiclePartFix = Config.Bind("HeldItem", "VehiclePartFix", true, "Fix the vanilla bug where a held vehicle part (cassette, radio, headlight...) is dropped when the vehicle camera is switched to third person and back.");
             VerboseHeld = Config.Bind("HeldItem", "VerboseLog", false, "Log the held-item bookkeeping in detail.");
 
             try { new Harmony(GUID).PatchAll(typeof(Plugin).Assembly); }
@@ -127,12 +124,7 @@ namespace Apocasaver
             _wasOnFoot = onFoot;
 
             if (!Plugin.Enabled.Value || _saving) return;
-            float remaining = Plugin.IntervalMinutes.Value * 60f - (now - _lastSave);
-            if (remaining > 0f)
-            {
-                WarnCountdown(remaining);
-                return;
-            }
+            if (now - _lastSave < Plugin.IntervalMinutes.Value * 60f) return;
 
             if (!_armed)
             {
@@ -146,25 +138,6 @@ namespace Apocasaver
 
             if (!CanSaveNow(now, onFoot)) return;
             TryAutosave(now);
-        }
-
-        // ---- "Autosave in X sec" countdown: at WarningSeconds, then every 15 s, never at 0 ----
-        private float _warnCycle = -1f;   // _lastSave value the current countdown belongs to
-        private int _warnNext;            // next threshold (seconds) to announce
-
-        private void WarnCountdown(float remaining)
-        {
-            if (!_armed) return;
-            int w = Plugin.WarningSeconds.Value;
-            if (w <= 0) return;
-            if (_warnCycle != _lastSave) { _warnCycle = _lastSave; _warnNext = w; }
-            if (_warnNext <= 0 || remaining > _warnNext) return;
-            // skip thresholds we slept through (e.g. paused in a menu) and announce the current one
-            while (_warnNext - 15 > 0 && remaining <= _warnNext - 15) _warnNext -= 15;
-            int shown = _warnNext;
-            _warnNext -= 15;
-            if (!InPlay()) return; // stay quiet in menus / loading; the next threshold will still fire
-            StatusLabel.Show("Autosave in " + shown + " sec", 4f, false);
         }
 
         /// Player is actually playing (not in a menu, loading screen, dead...).
