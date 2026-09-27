@@ -11,7 +11,7 @@ slots so you can tell autosaves and manual saves apart.
   alive, awake, on foot for ≥ 2 s, time not paused. If the interval elapses while driving, it saves shortly after you get out.
 - Uses the game's own save flow (the same one the save-slot menu triggers), so saves are fully compatible.
 - Slot labels are stamped `Autosave (Seed: …) dd/MM/yyyy HH:mm` or `Manual (Seed: …) …`, with the label font auto-fit to the box.
-- On-screen status: **AUTOSAVING** while the save runs; a reminder to save at least once if the character has never been saved
+- On-screen status: *Autosave in 30 sec* / *15 sec* countdown (v1.5), **AUTOSAVING** while the save runs; a reminder to save at least once if the character has never been saved
   (autosave never writes to a slot that was not chosen by you).
 - **Keeps the item in your hand across saves and loads** (v1.4): the item you are holding is recorded when the game is saved and
   put back into your hand after loading. Two vanilla bugs are fixed on the way: clicking any pause-menu button (e.g. *Save*)
@@ -30,6 +30,7 @@ Config: `BepInEx\config\com.denis.apocalypter.apocasaver.cfg`, section `[General
 | --- | --- | --- |
 | `Enabled` | `true` | Turn autosaving on/off |
 | `IntervalMinutes` | `10` | Minutes between autosaves (1–120) |
+| `Autosave warning (sec)` | `30` | Show *Autosave in X sec* this many seconds before an autosave, then every 15 s (never at 0). `0` disables the warning |
 | `Apocasetter` | `true` | Show in the Apocasetter Mods menu |
 
 Section `[HeldItem]`:
