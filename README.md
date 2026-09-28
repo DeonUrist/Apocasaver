@@ -13,7 +13,7 @@ slots so you can tell autosaves and manual saves apart.
 - Slot labels are stamped `Autosave (Seed: …) dd/MM/yyyy HH:mm` or `Manual (Seed: …) …`, with the label font auto-fit to the box.
 - On-screen status: *Autosave in 30 sec* / *15 sec* countdown (v1.5), **AUTOSAVING** while the save runs; a reminder to save at least once if the character has never been saved
   (autosave never writes to a slot that was not chosen by you).
-- **Save naming** (v1.6, off by default): a small popup asks for a name before every manual save; the slot then reads `Name (Seed: …) date` and autosaves to that slot keep the name. Cancel aborts the save.
+- **Save naming** (v1.6, on by default since v1.7): a small popup asks for a name before every manual save; the slot then reads `Name (Seed: …) date` and autosaves to that slot keep the name. Cancel aborts the save. With [Apocasetter](../Apocasetter) installed the popup uses its theme and blocks game input while you type; without it, a plain popup.
 - Crates and boxes (anything with items inside) are excluded from all held-item handling and behave exactly as in vanilla (v1.5.2).
 - **Keeps the item in your hand across saves and loads** (v1.4): the item you are holding is recorded when the game is saved and
   put back into your hand after loading. Two vanilla bugs are fixed on the way: clicking any pause-menu button (e.g. *Save*)
@@ -32,7 +32,7 @@ Config: `BepInEx\config\com.denis.apocalypter.apocasaver.cfg`, section `[General
 | --- | --- | --- |
 | `Enabled` | `true` | Turn autosaving on/off |
 | `IntervalMinutes` | `10` | Minutes between autosaves (1–120) |
-| `Save naming` | `false` | Ask for a name when you save (slot menu, ESC menu or a save point). The name replaces *Manual* in the slot label, autosaves keep it, Cancel aborts the save |
+| `Save naming` | `true` | Ask for a name when you save (slot menu, ESC menu or a save point). The name replaces *Manual* in the slot label, autosaves keep it, Cancel aborts the save. Uses the Apocasetter look when installed |
 | `Autosave warning (sec)` | `30` | Show *Autosave in X sec* this many seconds before an autosave, then every 15 s (never at 0). `0` disables the warning |
 | `Apocasetter` | `true` | Show in the Apocasetter Mods menu |
 

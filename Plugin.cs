@@ -16,7 +16,7 @@ namespace Apocasaver
     {
         public const string GUID = "com.denis.apocalypter.apocasaver";
         public const string NAME = "Apocasaver";
-        public const string VERSION = "1.6.2";
+        public const string VERSION = "1.7.0";
 
         internal static ManualLogSource Log;
         internal static ConfigEntry<bool> Enabled;
@@ -37,8 +37,8 @@ namespace Apocasaver
                 new ConfigDescription("Minutes between autosaves. The game is saved over the slot this character was last saved to (or loaded from). " +
                                       "If you are in a vehicle when the time is up, the autosave happens as soon as you get out.",
                                       new AcceptableValueRange<float>(1f, 120f)));
-            SaveNamingEnabled = Config.Bind("General", "Save naming", false,
-                "Ask for a name when you save (slot menu, ESC menu or a save point). The name replaces \"Manual\" in the slot label and autosaves keep it. Cancel aborts the save.");
+            SaveNamingEnabled = Config.Bind("General", "Save naming", true,
+                "Ask for a name when you save (slot menu, ESC menu or a save point). The name replaces \"Manual\" in the slot label and autosaves keep it. Cancel aborts the save. Uses the Apocasetter look when Apocasetter is installed.");
             WarningSeconds = Config.Bind("General", "Autosave warning (sec)", 30,
                 new ConfigDescription("Show \"Autosave in X sec\" this many seconds before an autosave, then again every 15 seconds. 0 = no warning.",
                                       new AcceptableValueRange<int>(0, 300)));

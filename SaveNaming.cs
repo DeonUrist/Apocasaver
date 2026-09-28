@@ -1,5 +1,8 @@
 using System;
+using System.Linq;
+using System.Reflection;
 using System.Text.RegularExpressions;
+using BepInEx.Bootstrap;
 using HarmonyLib;
 using HutongGames.PlayMaker;
 using UnityEngine;
@@ -11,6 +14,7 @@ namespace Apocasaver
     /// clicks Yes_Save itself), a small popup asks for a name first.
     /// OK replays the game's own click with the name remembered for the slot stamp ("<name> (Seed: X) date"); Cancel aborts
     /// the save (the click never reaches the game). Autosaves keep whatever name the slot already carries.
+    /// With Apocasetter installed the popup uses its theme and its input blocker; otherwise a plain IMGUI popup.
     internal static class SaveNaming
     {
         private const int MaxLen = 24;
@@ -27,6 +31,8 @@ namespace Apocasaver
         private static bool _lockedCursor, _pausedTime;
         private static float _prevTimeScale = 1f;
         private static CursorLockMode _prevLock; private static bool _prevVisible;
+        private static bool _inputBlocked;      // Apocasetter's InputBlocker is on (released one frame after closing)
+        private static int _unblockFrame = -1;
         private static bool _eventSystemWasEnabled;
         private static EventSystem _disabledEs;
         private static bool _focusPending;
@@ -112,6 +118,9 @@ namespace Apocasaver
                 if (es != null && es.enabled) { _disabledEs = es; _eventSystemWasEnabled = true; es.enabled = false; }   // popup clicks must not reach the menu buttons behind it
             }
             catch { }
+            // keys typed into the name field must not reach the game's PlayMaker input polls
+            if (!_inputBlocked) _inputBlocked = ApocasetterUi.SetInputBlock(true);
+            _unblockFrame = -1;
         }
 
         private static void Close()
@@ -126,12 +135,27 @@ namespace Apocasaver
                 _lockedCursor = false;
             }
             catch { }
+            if (_inputBlocked) _unblockFrame = Time.frameCount + 1;   // keep blocking one more frame: the closing key/click must not reach the game
         }
 
         private static void EnforceCursor() { if (_lockedCursor) { Cursor.lockState = CursorLockMode.None; Cursor.visible = true; } }
 
-        /// From the Runner's LateUpdate: keep the cursor free while the popup is open (the game re-locks it every frame).
-        internal static void LateUpdate() { if (_open) EnforceCursor(); }
+        /// From the Runner's LateUpdate: keep the cursor free while the popup is open (the game re-locks it every frame),
+        /// and release Apocasetter's input blocker one frame after closing.
+        internal static void LateUpdate()
+        {
+            if (_open) { EnforceCursor(); return; }
+            if (_inputBlocked && _unblockFrame >= 0 && Time.frameCount >= _unblockFrame) ReleaseInputBlock();
+        }
+
+        private static void ReleaseInputBlock()
+        {
+            // InputBlocker.Set(false) also resets the time scale; the popup manages the time scale itself, so keep it.
+            float ts = Time.timeScale;
+            ApocasetterUi.SetInputBlock(false);
+            Time.timeScale = ts;
+            _inputBlocked = false; _unblockFrame = -1;
+        }
 
         private static void Confirm()
         {
@@ -164,8 +188,12 @@ namespace Apocasaver
             Plugin.Log.LogInfo("Save naming: cancelled, not saving");
         }
 
-        /// The runner is going away (scene change): close without saving and give the game its time scale and cursor back.
-        internal static void Abort() { if (_open) Cancel(); }
+        /// The runner is going away (scene change): close without saving and give the game its time scale, cursor and input back.
+        internal static void Abort()
+        {
+            if (_open) Cancel();
+            if (_inputBlocked) ReleaseInputBlock();
+        }
 
         private static string Clean(string s)
         {
@@ -176,17 +204,26 @@ namespace Apocasaver
         }
 
         // ---- IMGUI popup (drawn by the Runner's OnGUI) ----
-        private static GUIStyle _box, _label, _field, _button;
+        private static GUIStyle _box, _label, _field, _button;   // plain look, used without Apocasetter
 
         internal static void OnGUI()
         {
             if (!_open) return;
-            if (_box == null)
+            GUIStyle box, label, field, button;
+            if (ApocasetterUi.ApplyTheme())
             {
-                _box = new GUIStyle(GUI.skin.window);
-                _label = new GUIStyle(GUI.skin.label) { fontSize = 18, alignment = TextAnchor.MiddleLeft };
-                _field = new GUIStyle(GUI.skin.textField) { fontSize = 18, alignment = TextAnchor.MiddleLeft };
-                _button = new GUIStyle(GUI.skin.button) { fontSize = 17 };
+                box = GUI.skin.window; label = ApocasetterUi.Header ?? GUI.skin.label; field = GUI.skin.textField; button = GUI.skin.button;
+            }
+            else
+            {
+                if (_box == null)
+                {
+                    _box = new GUIStyle(GUI.skin.window);
+                    _label = new GUIStyle(GUI.skin.label) { fontSize = 18, alignment = TextAnchor.MiddleLeft };
+                    _field = new GUIStyle(GUI.skin.textField) { fontSize = 18, alignment = TextAnchor.MiddleLeft };
+                    _button = new GUIStyle(GUI.skin.button) { fontSize = 17 };
+                }
+                box = _box; label = _label; field = _field; button = _button;
             }
             // Enter = OK. Checked before the text field is drawn so the field never sees it. A save point is used with Enter,
             // so presses in the first 0.3 s (the one that opened the popup) are swallowed instead.
@@ -197,13 +234,62 @@ namespace Apocasaver
             float w = 460f, h = 130f;
             var r = new Rect((Screen.width - w) / 2f, (Screen.height - h) / 2f, w, h);
             GUI.depth = -1000;
-            GUI.Box(r, "", _box);
-            GUI.Label(new Rect(r.x + 16, r.y + 12, w - 32, 26), "Save name", _label);
+            GUI.Box(r, "", box);
+            GUI.Label(new Rect(r.x + 16, r.y + 12, w - 32, 26), "Save name", label);
             GUI.SetNextControlName("apocasaver_savename");
-            _text = GUI.TextField(new Rect(r.x + 16, r.y + 44, w - 32, 32), _text, MaxLen, _field);
-            if (GUI.Button(new Rect(r.x + w - 16 - 200, r.y + h - 44, 96, 32), "OK", _button)) { Confirm(); return; }
-            if (GUI.Button(new Rect(r.x + w - 16 - 96, r.y + h - 44, 96, 32), "Cancel", _button)) { Cancel(); return; }
+            _text = GUI.TextField(new Rect(r.x + 16, r.y + 44, w - 32, 32), _text, MaxLen, field);
+            if (GUI.Button(new Rect(r.x + w - 16 - 200, r.y + h - 44, 96, 32), "OK", button)) { Confirm(); return; }
+            if (GUI.Button(new Rect(r.x + w - 16 - 96, r.y + h - 44, 96, 32), "Cancel", button)) { Cancel(); return; }
             if (_focusPending) { GUI.FocusControl("apocasaver_savename"); _focusPending = false; }
+        }
+    }
+
+    /// Optional use of Apocasetter's GUI (theme + input blocker), found by reflection so Apocasaver has no dependency on it.
+    internal static class ApocasetterUi
+    {
+        private const string Guid = "com.denis.apocalypter.apocasetter";
+        private static bool _resolved;
+        private static MethodInfo _apply, _block;
+        private static FieldInfo _header;
+
+        private static void Resolve()
+        {
+            if (_resolved) return;
+            _resolved = true;
+            try
+            {
+                if (!Chainloader.PluginInfos.ContainsKey(Guid)) return;
+                var asm = AppDomain.CurrentDomain.GetAssemblies().FirstOrDefault(a => a.GetName().Name == "Apocasetter");
+                if (asm == null) return;
+                var theme = asm.GetType("Apocasetter.Theme");
+                var blocker = asm.GetType("Apocasetter.InputBlocker");
+                const BindingFlags ps = BindingFlags.Public | BindingFlags.Static;
+                _apply = theme != null ? theme.GetMethod("Apply", ps, null, Type.EmptyTypes, null) : null;
+                _header = theme != null ? theme.GetField("Header", ps) : null;
+                _block = blocker != null ? blocker.GetMethod("Set", ps, null, new[] { typeof(bool) }, null) : null;
+                Plugin.Log.LogInfo("Save naming: Apocasetter found (theme " + (_apply != null ? "yes" : "no") + ", input blocker " + (_block != null ? "yes" : "no") + ")");
+            }
+            catch (Exception e) { Plugin.Log.LogWarning("Save naming: Apocasetter lookup failed, using the plain popup: " + e.Message); _apply = null; _block = null; _header = null; }
+        }
+
+        /// Applies Apocasetter's skin to GUI.skin for this OnGUI call. False = not available, use the plain look.
+        internal static bool ApplyTheme()
+        {
+            Resolve();
+            if (_apply == null) return false;
+            try { _apply.Invoke(null, null); return true; }
+            catch (Exception e) { Plugin.Log.LogWarning("Save naming: Apocasetter theme failed, using the plain popup: " + e.Message); _apply = null; return false; }
+        }
+
+        internal static GUIStyle Header { get { try { return _header != null ? _header.GetValue(null) as GUIStyle : null; } catch { return null; } } }
+
+        /// Apocasetter's InputBlocker.Set(on). False = not available.
+        internal static bool SetInputBlock(bool on)
+        {
+            Resolve();
+            if (_block == null) return false;
+            try { _block.Invoke(null, new object[] { on }); return true; }
+            catch (Exception e) { Plugin.Log.LogWarning("Save naming: Apocasetter input blocker failed: " + e.Message); _block = null; return false; }
         }
     }
 
