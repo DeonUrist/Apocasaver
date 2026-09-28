@@ -1,6 +1,6 @@
 # Apocasaver
 
-**Autosave** for Apocalypter (BepInEx 5 plugin).
+**Autosave** and **Save naming** for Apocalypter (BepInEx 5 plugin).
 
 Saves the game at a configurable interval into the slot the current character was last saved to or loaded from, and stamps the save
 slots so you can tell autosaves and manual saves apart.
