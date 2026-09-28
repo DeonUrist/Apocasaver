@@ -1,7 +1,5 @@
 using System;
-using System.Collections.Generic;
 using System.IO;
-using System.Reflection;
 using System.Text;
 using BepInEx;
 using BepInEx.Configuration;
@@ -18,15 +16,16 @@ namespace Apocasaver
     {
         public const string GUID = "com.denis.apocalypter.apocasaver";
         public const string NAME = "Apocasaver";
-        public const string VERSION = "1.6.0";
+        public const string VERSION = "1.6.1";
 
         internal static ManualLogSource Log;
         internal static ConfigEntry<bool> Enabled;
         internal static ConfigEntry<float> IntervalMinutes;
         internal static ConfigEntry<int> WarningSeconds;
         internal static ConfigEntry<bool> SaveNamingEnabled;
-        internal static Runner Current;
         internal static ConfigEntry<bool> KeepHeldItem, SaveFix, MenuClickFix, VehiclePartFix, VerboseHeld;
+
+        internal static Runner Current;   // the live runner (re-created after scene loads)
         private static GameObject _runnerGo;
 
         private void Awake()
@@ -39,7 +38,7 @@ namespace Apocasaver
                                       "If you are in a vehicle when the time is up, the autosave happens as soon as you get out.",
                                       new AcceptableValueRange<float>(1f, 120f)));
             SaveNamingEnabled = Config.Bind("General", "Save naming", false,
-                "Ask for a name when you save (slot menu or ESC menu). The name replaces \"Manual\" in the slot label and autosaves keep it. Cancel aborts the save.");
+                "Ask for a name when you save (slot menu, ESC menu or a save point). The name replaces \"Manual\" in the slot label and autosaves keep it. Cancel aborts the save.");
             WarningSeconds = Config.Bind("General", "Autosave warning (sec)", 30,
                 new ConfigDescription("Show \"Autosave in X sec\" this many seconds before an autosave, then again every 15 seconds. 0 = no warning.",
                                       new AcceptableValueRange<int>(0, 300)));
@@ -51,7 +50,7 @@ namespace Apocasaver
             VerboseHeld = Config.Bind("HeldItem", "VerboseLog", false, "Log the held-item bookkeeping in detail.");
 
             try { new Harmony(GUID).PatchAll(typeof(Plugin).Assembly); }
-            catch (Exception e) { Logger.LogError("Harmony patching failed (held-item fixes inactive): " + e); }
+            catch (Exception e) { Logger.LogError("Harmony patching failed (held-item fixes and save naming inactive): " + e); }
 
             SceneManager.sceneLoaded += OnSceneLoaded;
             EnsureRunner("Awake");
@@ -81,6 +80,7 @@ namespace Apocasaver
         private void Awake() { Plugin.Current = this; }
         private void OnGUI() { SaveNaming.OnGUI(); }
         private void LateUpdate() { SaveNaming.LateUpdate(); }
+        private void OnDestroy() { SaveNaming.Abort(); }   // never leave the game paused behind a popup that is gone
 
         // Game FSMs we watch / drive.
         private PlayMakerFSM _saveLoad;   // SaveLoadGame [SaveLoadGame]  — SaveFile var, state isPlay/SaveGame/LoadGame
@@ -98,7 +98,10 @@ namespace Apocasaver
         private string _lastState = "";
         private bool _saving;
         private float _savingSince;
-        private bool _dumped;
+        private string _armedFile;        // slot file at the moment we armed
+        private float _dropWaitUntil = -1f;   // a held crate was dropped; save once it has left the hand
+        private bool _slotLabelsFitted;
+        private int _heldErrors;
 
         private static bool Alive(PlayMakerFSM f) { return f != null && f.gameObject != null; }
 
@@ -106,7 +109,8 @@ namespace Apocasaver
         {
             float now = Time.realtimeSinceStartup;
             StatusLabel.Tick();
-            try { HeldItemKeeper.Tick(); } catch (Exception e) { if (Time.frameCount % 600 == 0) Plugin.Log.LogWarning("HeldItemKeeper: " + e.Message); }
+            try { HeldItemKeeper.Tick(); }
+            catch (Exception e) { if (_heldErrors++ % 600 == 0) Plugin.Log.LogWarning("HeldItemKeeper (" + _heldErrors + "x): " + e); }   // first one, then every 600th
             if (now >= _nextScan) { _nextScan = now + 1f; Scan(); }
             if (!Alive(_saveLoad)) { Disarm("SaveLoadGame gone"); _lastState = ""; return; }
 
@@ -121,7 +125,7 @@ namespace Apocasaver
                 if (st == "SaveGame")
                 {
                     _lastSave = now; Arm("game saved");
-                    if (!_saving)   // the player saved (slot menu or ESC quick save)
+                    if (!_saving)   // the player saved (slot menu, ESC menu or a save point)
                     {
                         string kind = Plugin.SaveNamingEnabled.Value && SaveNaming.PendingName != null ? SaveNaming.PendingName : "Manual";
                         SaveNaming.PendingName = null;
@@ -191,8 +195,6 @@ namespace Apocasaver
             return true;
         }
 
-        private string _armedFile;        // SaveFile value at the moment we armed
-
         internal void Disarm(string why)
         {
             if (_armed) Plugin.Log.LogInfo("Autosave disarmed (" + why + ")");
@@ -205,29 +207,16 @@ namespace Apocasaver
             if (string.IsNullOrEmpty(_armedFile)) { Disarm("empty SaveFile"); return; }
             if (!_armed) Plugin.Log.LogInfo("Autosave armed (" + why + "), slot file = " + _armedFile);
             _armed = true;
-            if (!_dumped) { _dumped = true; DumpSaveFsms(); }
         }
 
-        /// The slot file the game will actually write to: Easy Save's default path, which the slot buttons set through
-        /// ES3SettingsMod.SetSavePath (SaveLoadGame's own SaveFile variable is only updated on load, not on save-to-other-slot).
-        /// Current slot file as the game will write it (ES3 default path), or null.
+        /// The slot file the game will write to (see HeldItemKeeper.SaveFileCandidates), or null.
         internal static string CurrentSaveFile()
         {
-            var r = Plugin.Current;
-            return r != null ? r.SaveFileName() : null;
+            var c = HeldItemKeeper.SaveFileCandidates();
+            return c.Count > 0 ? c[0] : null;
         }
 
-        internal string SaveFileName()
-        {
-            try
-            {
-                var p = ES3Settings.defaultSettings != null ? ES3Settings.defaultSettings.path : null;
-                if (!string.IsNullOrEmpty(p)) return Path.GetFileName(p);
-            }
-            catch (Exception e) { if (!_warnedEs3) { _warnedEs3 = true; Plugin.Log.LogWarning("ES3Settings.defaultSettings unavailable, falling back to SaveLoadGame.SaveFile: " + e.Message); } }
-            try { var v = _saveLoad.FsmVariables.GetFsmString("SaveFile"); return v != null ? v.Value : null; } catch { return null; }
-        }
-        private bool _warnedEs3;
+        private string SaveFileName() { return CurrentSaveFile(); }
 
         private static bool SlotFileExists(string file)
         {
@@ -246,8 +235,6 @@ namespace Apocasaver
             if (!SlotFileExists(file)) return false;
             return true;
         }
-
-        private float _dropWaitUntil = -1f;   // a held crate was dropped; save once it has left the hand
 
         private void TryAutosave(float now)
         {
@@ -276,7 +263,6 @@ namespace Apocasaver
             }
         }
 
-        private bool _slotLabelsFitted;
         internal void ResetSlotLabelFit() { _slotLabelsFitted = false; }
 
         /// The slot date labels ("save N time" / "load N time") have a fixed box sized for a bare date. Let them shrink the
@@ -375,7 +361,7 @@ namespace Apocasaver
                 if (!Alive(_saveLoad) && go == "SaveLoadGame" && fsm == "SaveLoadGame") _saveLoad = f;
                 else if (!Alive(_saveButton) && go == "savegame" && fsm == "Continue" && GoPath(f.transform).Contains("SaveGame_Canvas")) _saveButton = f;
                 else if (!Alive(_menu) && go == "__GameManager__" && fsm == "Menu") _menu = f;
-                else if (go == "Player" && f.transform.parent == null)
+                else if (go == "Player")   // the player root (parented under the vehicle while driving)
                 {
                     if (!Alive(_inCar) && fsm == "InCar") _inCar = f;
                     else if (!Alive(_health) && fsm == "Health") _health = f;
@@ -389,61 +375,6 @@ namespace Apocasaver
             var sb = new StringBuilder(t.name);
             while (t.parent != null) { t = t.parent; sb.Insert(0, t.name + "/"); }
             return sb.ToString();
-        }
-
-        // ---- one-time diagnostic dump of the save-related FSMs (log only) ----
-        private void DumpSaveFsms()
-        {
-            try
-            {
-                var sb = new StringBuilder("\n==== save FSM dump ====\n");
-                foreach (var f in Resources.FindObjectsOfTypeAll<PlayMakerFSM>())
-                {
-                    if (f == null || f.gameObject == null || !f.gameObject.scene.IsValid()) continue;
-                    string p = GoPath(f.transform);
-                    bool want = (f.gameObject.name == "SaveLoadGame") || (f.gameObject.name == "savegame") ||
-                                (f.gameObject.name == "Yes_Save") || (f.gameObject.name == "Save_Game" && p.Contains("MainMenu")) ||
-                                (p.Contains("SaveGame_Canvas") && f.gameObject.name == "save_game_1");
-                    if (!want) continue;
-                    sb.Append("== ").Append(p).Append("  [").Append(f.FsmName).Append("]  active=").Append(f.gameObject.activeInHierarchy).Append(" state=").Append(SafeState(f)).Append('\n');
-                    if (f.Fsm == null || !f.Fsm.Initialized) continue;
-                    foreach (var v in f.FsmVariables.GetAllNamedVariables()) sb.Append("   var ").Append(v.Name).Append(" = ").Append(Fmt(v, 0)).Append('\n');
-                    foreach (var s in f.FsmStates)
-                    {
-                        sb.Append("   state ").Append(s.Name).Append('\n');
-                        foreach (var a in s.Actions)
-                        {
-                            sb.Append("      ").Append(a.GetType().Name).Append(": ");
-                            foreach (var fi in a.GetType().GetFields(BindingFlags.Public | BindingFlags.Instance))
-                            {
-                                object val = null; try { val = fi.GetValue(a); } catch { }
-                                sb.Append(fi.Name).Append('=').Append(Fmt(val, 0)).Append("; ");
-                            }
-                            sb.Append('\n');
-                        }
-                    }
-                }
-                Plugin.Log.LogInfo(sb.ToString());
-            }
-            catch (Exception e) { Plugin.Log.LogWarning("dump failed: " + e); }
-        }
-
-        private static string Fmt(object v, int depth)
-        {
-            if (v == null) return "null";
-            if (v is string) return "\"" + v + "\"";
-            if (v is FsmEvent) return "event:" + ((FsmEvent)v).Name;
-            if (v is FsmString) return "\"" + ((FsmString)v).Value + "\"" + (((FsmString)v).UsesVariable ? "{" + ((FsmString)v).Name + "}" : "");
-            if (v is FsmBool) return ((FsmBool)v).Value.ToString();
-            if (v is FsmFloat) return ((FsmFloat)v).Value.ToString();
-            if (v is FsmInt) return ((FsmInt)v).Value.ToString();
-            if (v is FsmGameObject) { var g = ((FsmGameObject)v).Value; return "GO:" + (g != null ? g.name : "null") + "{" + ((FsmGameObject)v).Name + "}"; }
-            if (v is FsmOwnerDefault) { var od = (FsmOwnerDefault)v; return od.OwnerOption == OwnerDefaultOption.UseOwner ? "Owner" : Fmt(od.GameObject, depth + 1); }
-            if (v is FsmEventTarget) { var t = (FsmEventTarget)v; return "target(" + t.target + " go=" + Fmt(t.gameObject, depth + 1) + " fsm=" + Fmt(t.fsmName, depth + 1) + " excludeSelf=" + Fmt(t.excludeSelf, depth + 1) + " children=" + Fmt(t.sendToChildren, depth + 1) + ")"; }
-            if (v is NamedVariable) return "{" + ((NamedVariable)v).Name + "}";
-            if (v is UnityEngine.Object) return v.GetType().Name + ":" + ((UnityEngine.Object)v).name;
-            if (v is Array) { var arr = (Array)v; var sb = new StringBuilder("["); int n = 0; foreach (var e in arr) { if (n++ > 0) sb.Append(','); if (n > 8) { sb.Append("..."); break; } sb.Append(Fmt(e, depth + 1)); } return sb.Append(']').ToString(); }
-            return v.ToString();
         }
     }
 }

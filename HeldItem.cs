@@ -18,13 +18,18 @@ namespace Apocasaver
     //     gravity back but the colliders stay triggers, so it falls through the world forever (what an autosave used to do).
     //   * The game itself never restores the hand: after a load the item just lies where it was.
     //
+    //   * Vehicle parts restart their CheckTag FSM when the vehicle camera toggles PlayerCamera off and on; its start state
+    //     unparents the part, so a held cassette/radio/headlight is thrown out of the hand.
+    //
     //  What this does:
-    //   * MenuClickFix:  skip GrabItem's mouse poll while __GameManager__/Menu is not in "play".
-    //   * SaveFix:       on the SaveGame event, make the held item's colliders solid for the duration of the save
-    //                    (collisions with the player ignored meanwhile), restore afterwards.
-    //   * KeepHeldItem:  on save, record "<item>|<seed>" and the hand-local pose in the save file; after a load, find the
-    //                    item again and hand it to GrabItem's Grab state.
-    //   * HandPose:      public per-item pose store other mods may use (Apocapocket does, via reflection).
+    //   * MenuClickFix:    skip GrabItem's mouse poll while __GameManager__/Menu is not in "play".
+    //   * SaveFix:         on the SaveGame event, make the held item's colliders solid for the duration of the save
+    //                      (collisions with the player ignored meanwhile), restore afterwards.
+    //   * KeepHeldItem:    on save, record "<item>|<seed>" and the hand-local pose in the save file; after a load, find the
+    //                      item again and hand it to GrabItem's Grab state.
+    //   * VehiclePartFix:  switch off RestartOnEnable on the held item's CheckTag/LockPhysics FSMs while it is in the hand.
+    //   * Crates/boxes (anything with saveable items inside) are left entirely to the game; an autosave drops them first.
+    //   * HandPose:        public per-item pose store other mods may use (Apocapocket does, via reflection).
     // =====================================================================================================================
 
     /// Per-item hand-local pose store, kept in the current save file next to the game's own item data.
@@ -99,7 +104,6 @@ namespace Apocasaver
         {
             var s = new ES3Settings(file);
             s.location = loc;
-            if (s.path != file) s.path = file;
             return s;
         }
 
@@ -177,7 +181,9 @@ namespace Apocasaver
         private static Transform _hand, _handItemUse;
         private static float _nextScan;
 
-        private static GameObject _lastHeld; private static Vector3 _lastPos; private static Quaternion _lastRot;
+        // last item seen in the hand; used on save only if it left the hand moments ago (e.g. forced out by the save itself)
+        private static GameObject _lastHeld; private static Vector3 _lastPos; private static Quaternion _lastRot; private static float _lastHeldLostAt = -1f;
+        private const float LastHeldGrace = 3f;
         private static bool _saveSeen; private static string _lastState = ""; private static float _flushAt = -1f; private static string _pendingFile;
         private static bool _restoreChecked; private static string _restoreName; private static float _restoreAt;
 
@@ -187,6 +193,10 @@ namespace Apocasaver
         private static readonly List<Collider> _itemCols = new List<Collider>();
         private static readonly List<Collider> _playerCols = new List<Collider>();
         private static float _safeDeadline;
+
+        // container check cache (items can be put into a held box, so it is re-evaluated twice a second)
+        private static GameObject _ccItem; private static bool _ccResult; private static float _ccAt;
+        private static GameObject _lastContainerLogged;
 
         internal static bool MenuOpen { get { return _menu != null && _menu.gameObject != null && _menu.Fsm.Initialized && _menu.ActiveStateName != "play"; } }
 
@@ -198,14 +208,19 @@ namespace Apocasaver
             if (now >= _nextScan) { _nextScan = now + 1f; Scan(); }
             if (_grab == null || _grab.gameObject == null || _saveLoad == null || _saveLoad.gameObject == null) return;
 
-            // Remember what is in the hand (deliberate drop/throw forgets it).
-            var h = HeldItem();
+            // Remember what is in the hand. It is forgotten when dropped/thrown/put away, when a crate is picked up instead,
+            // when it went into a slot or pocket under the camera, or a few seconds after it left the hand.
+            var raw = RawHeldItem();
+            var h = raw != null && !IsContainer(raw) ? raw : null;
             if (Plugin.VehiclePartFix.Value) RestartGuard.Track(h); else RestartGuard.Track(null);
-            if (h != null && h.transform.parent != null) { _lastHeld = h; _lastPos = h.transform.localPosition; _lastRot = h.transform.localRotation; }
-            else if (h == null && _lastHeld != null)
+            if (h != null && h.transform.parent != null) { _lastHeld = h; _lastPos = h.transform.localPosition; _lastRot = h.transform.localRotation; _lastHeldLostAt = -1f; }
+            else if (_lastHeld != null)
             {
                 string gs = SafeState(_grab);
-                if (gs == "Drop" || gs == "Throw") _lastHeld = null;
+                if (_lastHeldLostAt < 0f) _lastHeldLostAt = now;
+                if ((raw != null && raw != _lastHeld) || gs == "Drop" || gs == "Throw" || gs == "notHold" || now - _lastHeldLostAt > LastHeldGrace
+                    || (_lastHeld.transform.parent != null && _lastHeld.transform.parent != _hand && _lastHeld.transform.IsChildOf(_grab.transform)))
+                    _lastHeld = null;
             }
 
             // Follow the game's save/load flow.
@@ -249,7 +264,7 @@ namespace Apocasaver
                 var held = HeldItem();
                 if (held != null && Plugin.SaveFix.Value) BeginSafe(held);
                 if (!Plugin.KeepHeldItem.Value) return;
-                if (held == null && _lastHeld != null) held = _lastHeld;   // forced out of the hand just before the save
+                if (held == null && _lastHeld != null) held = _lastHeld;   // left the hand moments before the save (see Tick)
                 if (held != null)
                 {
                     bool inHand = held.transform.parent == _hand;
@@ -355,7 +370,7 @@ namespace Apocasaver
         // ---- helpers
         private static void ResetPerGame()
         {
-            _restoreChecked = false; _restoreName = null; _lastHeld = null; _flushAt = -1f; _pendingFile = null;
+            _restoreChecked = false; _restoreName = null; _lastHeld = null; _lastHeldLostAt = -1f; _flushAt = -1f; _pendingFile = null;
             HandPose.Clear();
             EndSafe();
         }
@@ -387,10 +402,9 @@ namespace Apocasaver
         {
             var item = RawHeldItem();
             if (item == null) return null;
-            if (IsContainer(item)) { if (_lastContainerWarned != item) { _lastContainerWarned = item; V("Held item " + item.name + " is a crate/container: vanilla handling"); } return null; }
+            if (IsContainer(item)) { if (_lastContainerLogged != item) { _lastContainerLogged = item; V("Held item " + item.name + " is a crate/container: vanilla handling"); } return null; }
             return item;
         }
-        private static GameObject _lastContainerWarned;
 
         internal static GameObject RawHeldItem()
         {
@@ -414,11 +428,10 @@ namespace Apocasaver
         }
 
         /// Crate / box: by prefab name (crate_*, box_cardboard...) or structurally, i.e. it has other saveable items parented inside it.
-        private static GameObject _ccItem; private static bool _ccResult; private static float _ccAt;
         internal static bool IsContainer(GameObject item)
         {
             if (item == null) return false;
-            if (item == _ccItem && Time.unscaledTime - _ccAt < 0.5f) return _ccResult;   // re-checked twice a second (items can be put into a held box)
+            if (item == _ccItem && Time.unscaledTime - _ccAt < 0.5f) return _ccResult;
             _ccItem = item; _ccAt = Time.unscaledTime; _ccResult = ComputeIsContainer(item);
             return _ccResult;
         }

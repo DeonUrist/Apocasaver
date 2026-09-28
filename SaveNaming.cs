@@ -7,7 +7,8 @@ using UnityEngine.EventSystems;
 
 namespace Apocasaver
 {
-    /// Optional "Save naming": when the player saves (slot menu button or ESC-menu Yes), a small popup asks for a name first.
+    /// Optional "Save naming": when the player saves (slot menu button, ESC-menu Yes, or a save point in the world, which
+    /// clicks Yes_Save itself), a small popup asks for a name first.
     /// OK replays the game's own click with the name remembered for the slot stamp ("<name> (Seed: X) date"); Cancel aborts
     /// the save (the click never reaches the game). Autosaves keep whatever name the slot already carries.
     internal static class SaveNaming
@@ -24,6 +25,7 @@ namespace Apocasaver
         private static int _allowFrame = -1;
         private static float _openedAt;
         private static bool _lockedCursor, _pausedTime;
+        private static float _prevTimeScale = 1f;
         private static CursorLockMode _prevLock; private static bool _prevVisible;
         private static bool _eventSystemWasEnabled;
         private static EventSystem _disabledEs;
@@ -31,8 +33,6 @@ namespace Apocasaver
 
         /// Name chosen for the save in progress (consumed by the slot stamp); null = no custom name.
         internal static string PendingName;
-
-        internal static bool IsOpen { get { return _open; } }
 
         /// Custom name carried by a slot label, or null when it is a plain Autosave/Manual/date label.
         internal static string NameFromLabel(string label)
@@ -61,6 +61,7 @@ namespace Apocasaver
             // default text = the name this slot already carries
             string slot = slotButton ? n.Substring("save_game_".Length) : SlotNumber(Runner.CurrentSaveFile());
             _text = SlotName(slot) ?? "";
+            PendingName = null;   // a name from an earlier OK that never turned into a save must not leak into this one
             _pendingFsm = fsm; _pendingEvent = evt;
             Open();
             Plugin.Log.LogInfo("Save naming: asking for a name (" + (slotButton ? "slot " + slot : "quick save, slot " + slot) + ")");
@@ -101,7 +102,7 @@ namespace Apocasaver
             {
                 _prevLock = Cursor.lockState; _prevVisible = Cursor.visible;
                 _lockedCursor = _prevLock != CursorLockMode.None || !_prevVisible;
-                if (Time.timeScale > 0f) { _pausedTime = true; Time.timeScale = 0f; }
+                if (Time.timeScale > 0f) { _pausedTime = true; _prevTimeScale = Time.timeScale; Time.timeScale = 0f; }   // other mods may run a custom scale
                 EnforceCursor();
             }
             catch { }
@@ -120,7 +121,7 @@ namespace Apocasaver
             _disabledEs = null; _eventSystemWasEnabled = false;
             try
             {
-                if (_pausedTime) { _pausedTime = false; Time.timeScale = 1f; }
+                if (_pausedTime) { _pausedTime = false; if (Time.timeScale == 0f) Time.timeScale = _prevTimeScale; }
                 if (_lockedCursor) { Cursor.lockState = _prevLock; Cursor.visible = _prevVisible; }
                 _lockedCursor = false;
             }
@@ -142,7 +143,16 @@ namespace Apocasaver
             if (fsm == null || evt == null) return;
             Plugin.Log.LogInfo("Save naming: OK, name = " + (PendingName ?? "(none)"));
             _allowFsm = fsm; _allowFrame = Time.frameCount;
-            try { fsm.Event(evt); }
+            try
+            {
+                fsm.Event(evt);
+                // Both save buttons react to Clicked with a global transition into "clicked"; make sure it happened.
+                if (fsm.ActiveStateName != "clicked")
+                {
+                    Plugin.Log.LogWarning("Save naming: replayed click left " + fsm.GameObjectName + " in '" + fsm.ActiveStateName + "', entering 'clicked' directly");
+                    fsm.SetState("clicked");
+                }
+            }
             catch (Exception e) { Plugin.Log.LogWarning("Save naming: replaying the click failed: " + e.Message); }
             _allowFsm = null; _allowFrame = -1;
         }
@@ -153,6 +163,9 @@ namespace Apocasaver
             _pendingFsm = null; _pendingEvent = null; PendingName = null;
             Plugin.Log.LogInfo("Save naming: cancelled, not saving");
         }
+
+        /// The runner is going away (scene change): close without saving and give the game its time scale and cursor back.
+        internal static void Abort() { if (_open) Cancel(); }
 
         private static string Clean(string s)
         {
@@ -175,9 +188,11 @@ namespace Apocasaver
                 _field = new GUIStyle(GUI.skin.textField) { fontSize = 18, alignment = TextAnchor.MiddleLeft };
                 _button = new GUIStyle(GUI.skin.button) { fontSize = 17 };
             }
+            // Enter = OK. Checked before the text field is drawn so the field never sees it. A save point is used with Enter,
+            // so presses in the first 0.3 s (the one that opened the popup) are swallowed instead.
             var e = Event.current;
             bool enter = e.type == EventType.KeyDown && (e.keyCode == KeyCode.Return || e.keyCode == KeyCode.KeypadEnter);
-            if (enter && Time.realtimeSinceStartup - _openedAt > 0.3f) { e.Use(); Confirm(); return; }   // (a save point is used with Enter: don't let that same press confirm)
+            if (enter) { e.Use(); if (Time.realtimeSinceStartup - _openedAt > 0.3f) { Confirm(); return; } }
 
             float w = 460f, h = 130f;
             var r = new Rect((Screen.width - w) / 2f, (Screen.height - h) / 2f, w, h);

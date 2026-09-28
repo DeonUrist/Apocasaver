@@ -15,6 +15,7 @@ namespace Apocasaver
         private static bool _caps = true;
         private static float _hideAt;
         private static string _current;
+        private static bool _frame = true;
         private static float _nextTry;
 
         /// frame=false hides the button background art and shows the text alone, tight to the top-left corner.
@@ -25,7 +26,6 @@ namespace Apocasaver
             if (_current != text || _frame != frame) SetText(text, frame);
             if (!_label.activeSelf) _label.SetActive(true);
         }
-        private static bool _frame = true;
 
         public static void Hide()
         {
