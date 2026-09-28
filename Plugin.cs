@@ -18,12 +18,14 @@ namespace Apocasaver
     {
         public const string GUID = "com.denis.apocalypter.apocasaver";
         public const string NAME = "Apocasaver";
-        public const string VERSION = "1.5.2";
+        public const string VERSION = "1.6.0";
 
         internal static ManualLogSource Log;
         internal static ConfigEntry<bool> Enabled;
         internal static ConfigEntry<float> IntervalMinutes;
         internal static ConfigEntry<int> WarningSeconds;
+        internal static ConfigEntry<bool> SaveNamingEnabled;
+        internal static Runner Current;
         internal static ConfigEntry<bool> KeepHeldItem, SaveFix, MenuClickFix, VehiclePartFix, VerboseHeld;
         private static GameObject _runnerGo;
 
@@ -36,6 +38,8 @@ namespace Apocasaver
                 new ConfigDescription("Minutes between autosaves. The game is saved over the slot this character was last saved to (or loaded from). " +
                                       "If you are in a vehicle when the time is up, the autosave happens as soon as you get out.",
                                       new AcceptableValueRange<float>(1f, 120f)));
+            SaveNamingEnabled = Config.Bind("General", "Save naming", false,
+                "Ask for a name when you save (slot menu or ESC menu). The name replaces \"Manual\" in the slot label and autosaves keep it. Cancel aborts the save.");
             WarningSeconds = Config.Bind("General", "Autosave warning (sec)", 30,
                 new ConfigDescription("Show \"Autosave in X sec\" this many seconds before an autosave, then again every 15 seconds. 0 = no warning.",
                                       new AcceptableValueRange<int>(0, 300)));
@@ -74,6 +78,10 @@ namespace Apocasaver
     /// Per-frame logic (lives on a hidden GameObject because the game destroys plugin objects on scene load).
     internal class Runner : MonoBehaviour
     {
+        private void Awake() { Plugin.Current = this; }
+        private void OnGUI() { SaveNaming.OnGUI(); }
+        private void LateUpdate() { SaveNaming.LateUpdate(); }
+
         // Game FSMs we watch / drive.
         private PlayMakerFSM _saveLoad;   // SaveLoadGame [SaveLoadGame]  — SaveFile var, state isPlay/SaveGame/LoadGame
         private PlayMakerFSM _saveButton; // SaveGame_Canvas/SaveGame/savegame [Continue] — the game's own "save now" button
@@ -113,7 +121,12 @@ namespace Apocasaver
                 if (st == "SaveGame")
                 {
                     _lastSave = now; Arm("game saved");
-                    if (!_saving) StampSlotLabel(SaveFileName(), "Manual", true); // the player saved (slot menu or ESC quick save)
+                    if (!_saving)   // the player saved (slot menu or ESC quick save)
+                    {
+                        string kind = Plugin.SaveNamingEnabled.Value && SaveNaming.PendingName != null ? SaveNaming.PendingName : "Manual";
+                        SaveNaming.PendingName = null;
+                        StampSlotLabel(SaveFileName(), kind, true);
+                    }
                 }
                 else if (st == "LoadGame" || st == "generateTerrain 2" || st == "LoadVar") { _lastSave = now; Arm("game loaded"); }
                 else if (st == "Start" || st == "setSeed" || st == "generateTerrain") Disarm("new game (" + st + ")");
@@ -197,7 +210,14 @@ namespace Apocasaver
 
         /// The slot file the game will actually write to: Easy Save's default path, which the slot buttons set through
         /// ES3SettingsMod.SetSavePath (SaveLoadGame's own SaveFile variable is only updated on load, not on save-to-other-slot).
-        private string SaveFileName()
+        /// Current slot file as the game will write it (ES3 default path), or null.
+        internal static string CurrentSaveFile()
+        {
+            var r = Plugin.Current;
+            return r != null ? r.SaveFileName() : null;
+        }
+
+        internal string SaveFileName()
         {
             try
             {
@@ -242,7 +262,9 @@ namespace Apocasaver
             Plugin.Log.LogInfo("Autosaving to " + file + " ...");
             try
             {
-                StampSlotLabel(file, "Autosave", false);
+                string kind = "Autosave";
+                if (Plugin.SaveNamingEnabled.Value) { var keep = SaveNaming.NameForAutosave(file); if (keep != null) kind = keep; }
+                StampSlotLabel(file, kind, false);
                 _saveButton.SendEvent("Clicked");
                 _saving = true; _savingSince = now; _lastSave = now;
                 StatusLabel.Show("Autosaving", 30f, true);
