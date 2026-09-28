@@ -208,17 +208,14 @@ namespace Apocasaver
     }
 
     /// Intercepts the "Clicked" event of the game's save buttons while Save naming is on.
+    /// Fsm.ProcessEvent returns void: returning false skips it, which is what swallows the click.
     [HarmonyPatch(typeof(Fsm), "ProcessEvent")]
     internal static class SaveNaming_ProcessEvent_Patch
     {
-        static bool Prefix(Fsm __instance, FsmEvent fsmEvent, ref bool __result)
+        static bool Prefix(Fsm __instance, FsmEvent fsmEvent)
         {
-            try
-            {
-                if (SaveNaming.Intercept(__instance, fsmEvent)) { __result = true; return false; }
-            }
-            catch (Exception e) { Plugin.Log.LogWarning("Save naming intercept: " + e.Message); }
-            return true;
+            try { return !SaveNaming.Intercept(__instance, fsmEvent); }
+            catch (Exception e) { Plugin.Log.LogWarning("Save naming intercept: " + e.Message); return true; }
         }
     }
 }

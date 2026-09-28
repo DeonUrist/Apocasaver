@@ -16,7 +16,7 @@ namespace Apocasaver
     {
         public const string GUID = "com.denis.apocalypter.apocasaver";
         public const string NAME = "Apocasaver";
-        public const string VERSION = "1.6.1";
+        public const string VERSION = "1.6.2";
 
         internal static ManualLogSource Log;
         internal static ConfigEntry<bool> Enabled;
@@ -49,12 +49,23 @@ namespace Apocasaver
             VehiclePartFix = Config.Bind("HeldItem", "VehiclePartFix", true, "Fix the vanilla bug where a held vehicle part (cassette, radio, headlight...) is dropped when the vehicle camera is switched to third person and back.");
             VerboseHeld = Config.Bind("HeldItem", "VerboseLog", false, "Log the held-item bookkeeping in detail.");
 
-            try { new Harmony(GUID).PatchAll(typeof(Plugin).Assembly); }
-            catch (Exception e) { Logger.LogError("Harmony patching failed (held-item fixes and save naming inactive): " + e); }
+            ApplyPatches();
 
             SceneManager.sceneLoaded += OnSceneLoaded;
             EnsureRunner("Awake");
             Log.LogInfo(NAME + " " + VERSION + " loaded. Autosave every " + IntervalMinutes.Value + " min.");
+        }
+
+        /// Each patch class is applied on its own, so one that fails only disables its own feature.
+        private void ApplyPatches()
+        {
+            var harmony = new Harmony(GUID);
+            foreach (var t in typeof(Plugin).Assembly.GetTypes())
+            {
+                if (!t.IsDefined(typeof(HarmonyPatch), false)) continue;
+                try { harmony.CreateClassProcessor(t).Patch(); }
+                catch (Exception e) { Logger.LogError("Patch " + t.Name + " failed, that feature is inactive: " + e); }
+            }
         }
 
         private void OnSceneLoaded(Scene scene, LoadSceneMode mode)
