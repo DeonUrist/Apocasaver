@@ -3,7 +3,6 @@ using System.Linq;
 using System.Reflection;
 using System.Text.RegularExpressions;
 using BepInEx.Bootstrap;
-using HarmonyLib;
 using HutongGames.PlayMaker;
 using UnityEngine;
 using UnityEngine.EventSystems;
@@ -52,7 +51,8 @@ namespace Apocasaver
             return n;
         }
 
-        /// Called from the Fsm.ProcessEvent prefix. Returns true when the event must be swallowed (popup shown instead).
+        /// Called from the Fsm.ProcessEvent prefix (Plugin.cs) for "Clicked" events. Returns true when the event must be
+        /// swallowed (popup shown instead).
         internal static bool Intercept(Fsm fsm, FsmEvent evt)
         {
             if (!Plugin.SaveNamingEnabled.Value || fsm == null || evt == null || evt.Name != "Clicked") return false;
@@ -291,18 +291,6 @@ namespace Apocasaver
             if (_block == null) return false;
             try { _block.Invoke(null, new object[] { on }); return true; }
             catch (Exception e) { Plugin.Log.LogWarning("Save naming: Apocasetter input blocker failed: " + e.Message); _block = null; return false; }
-        }
-    }
-
-    /// Intercepts the "Clicked" event of the game's save buttons while Save naming is on.
-    /// Fsm.ProcessEvent returns void: returning false skips it, which is what swallows the click.
-    [HarmonyPatch(typeof(Fsm), "ProcessEvent")]
-    internal static class SaveNaming_ProcessEvent_Patch
-    {
-        static bool Prefix(Fsm __instance, FsmEvent fsmEvent)
-        {
-            try { return !SaveNaming.Intercept(__instance, fsmEvent); }
-            catch (Exception e) { Plugin.Log.LogWarning("Save naming intercept: " + e.Message); return true; }
         }
     }
 }

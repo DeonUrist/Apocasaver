@@ -15,11 +15,12 @@ slots so you can tell autosaves and manual saves apart.
   (autosave never writes to a slot that was not chosen by you).
 - **Save naming** (v1.6, on by default since v1.7): a small popup asks for a name before every manual save; the slot then reads `Name (Seed: …) date` and autosaves to that slot keep the name. Cancel aborts the save. With [Apocasetter](../Apocasetter) installed the popup uses its theme and blocks game input while you type; without it, a plain popup.
 - Crates and boxes (anything with items inside) are excluded from all held-item handling and behave exactly as in vanilla (v1.5.2).
-- **Keeps the item in your hand across saves and loads** (v1.4): the item you are holding is recorded when the game is saved and
-  put back into your hand after loading. Two vanilla bugs are fixed on the way: clicking any pause-menu button (e.g. *Save*)
-  no longer drops the held item, and an item saved while held no longer falls through the world after loading (its colliders
-  are made solid for the duration of the save).
+- **Held-item fixes** (always on): clicking any pause-menu button (e.g. *Save*) no longer drops the item in your hand; an item
+  saved while held is stored as a proper world item (solid colliders, gravity) so after loading it simply lies on the ground
+  where you stood instead of falling through the world (v1.8 — it is no longer put back into your hand); a held vehicle part
+  (cassette, radio, headlight…) survives switching the vehicle camera.
 - Opt-in entry in the [Apocasetter](../Apocasetter) Mods menu (no dependency on it).
+- Light: nothing is looked up per frame; the current save slot is read once a second and around saves.
 
 ## Installation
 
@@ -30,20 +31,13 @@ Config: `BepInEx\config\com.denis.apocalypter.apocasaver.cfg`, section `[General
 
 | Key | Default | Description |
 | --- | --- | --- |
-| `Enabled` | `true` | Turn autosaving on/off |
-| `IntervalMinutes` | `10` | Minutes between autosaves (1–120) |
 | `Save naming` | `true` | Ask for a name when you save (slot menu, ESC menu or a save point). The name replaces *Manual* in the slot label, autosaves keep it, Cancel aborts the save. Uses the Apocasetter look when installed |
+| `Autosave enabled` | `true` | Turn autosaving on/off (was `Enabled` before 1.8; the old value is carried over once) |
+| `IntervalMinutes` | `10` | Minutes between autosaves (1–120) |
 | `Autosave warning (sec)` | `30` | Show *Autosave in X sec* this many seconds before an autosave, then every 15 s (never at 0). `0` disables the warning |
 | `Apocasetter` | `true` | Show in the Apocasetter Mods menu |
 
-Section `[HeldItem]`:
-
-| Key | Default | Description |
-| --- | --- | --- |
-| `KeepHeldItem` | `true` | Remember the held item on save and put it back in your hand after loading |
-| `SaveFix` | `true` | Make the held item's colliders solid while the game saves (prevents falling through the world after a load) |
-| `MenuClickFix` | `true` | Pause-menu clicks no longer reach the grab FSM (no more dropping the item when you click *Save*) |
-| `VerboseLog` | `false` | Detailed held-item logging |
+The held-item fixes have no switches since 1.8 (the old `[HeldItem]` section is removed from the file automatically).
 
 ## Building
 
@@ -63,12 +57,12 @@ stamps the slot label and then sends `Clicked` to the `savegame` button FSM, whi
 
 `HeldItem.cs` is self-contained. `GrabItem`'s `ItemInHand` state polls the left mouse button every frame, also while the pause
 menu is open, so a menu click is what drops the item in vanilla; a Harmony prefix on PlayMaker's `GetMouseButtonDown` skips that
-poll for `GrabItem` while `__GameManager__/Menu` is not in `play`. On the game's `SaveGame` event the held item's trigger colliders
-are made solid (collisions with the player ignored via `Physics.IgnoreCollision`, which Easy Save does not store) and restored when
-`SaveLoadGame` leaves its save states. The record (`apocasaver.held = "<item>|<seed>"`, `apocasaver.pose.<item>`) is written about
-1 s after the save finished, both into Easy Save's cache (the game stores its cache at the end of a save) and straight to the file.
-After a load, once `SaveLoadGame` is in `isPlay` and the menu is closed, the item is found by name (seed must match) and handed to
-`GrabItem`'s `Grab` state at its saved hand-local pose.
+poll for `GrabItem` while `__GameManager__/Menu` is not in `play`. On the game's `SaveGame` event (one shared `Fsm.ProcessEvent`
+prefix serves this and Save naming) the held item is turned into a plain world item for the duration of the save: trigger colliders
+solid, gravity on, held at its hand pose, collisions with the player ignored via `Physics.IgnoreCollision` (which Easy Save does
+not store). Everything is put back when `SaveLoadGame` leaves its save states. The save file therefore describes an item that just
+drops to the ground after loading; the game never restores the hand and neither does the mod (since 1.8).
 
 `Apocasaver.HandPose` (`Get(name)` / `Set(name, "x,y,z,qx,qy,qz,qw")`) is public so other mods can keep per-item hand poses in the
-save file; [Apocapocket](../Apocapocket) uses it (by reflection, optional) for pocketed items.
+save file; [Apocapocket](../Apocapocket) uses it (by reflection, optional) for pocketed items. Queued poses are written about 1 s
+after the save finished, both into Easy Save's cache (the game stores its cache at the end of a save) and straight to the file.

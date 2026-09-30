@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Text;
 using BepInEx;
@@ -16,14 +17,13 @@ namespace Apocasaver
     {
         public const string GUID = "com.denis.apocalypter.apocasaver";
         public const string NAME = "Apocasaver";
-        public const string VERSION = "1.7.1";
+        public const string VERSION = "1.8.0";
 
         internal static ManualLogSource Log;
         internal static ConfigEntry<bool> Enabled;
         internal static ConfigEntry<float> IntervalMinutes;
         internal static ConfigEntry<int> WarningSeconds;
         internal static ConfigEntry<bool> SaveNamingEnabled;
-        internal static ConfigEntry<bool> KeepHeldItem, SaveFix, MenuClickFix, VehiclePartFix, VerboseHeld;
 
         internal static Runner Current;   // the live runner (re-created after scene loads)
         private static GameObject _runnerGo;
@@ -31,29 +31,66 @@ namespace Apocasaver
         private void Awake()
         {
             Log = Logger;
-            Config.Bind("General", "Apocasetter", true, "Show this mod in the Apocasetter Mods menu");
-            Enabled = Config.Bind("General", "Enabled", true, "Enable autosave.");
-            IntervalMinutes = Config.Bind("General", "IntervalMinutes", 10f,
-                new ConfigDescription("Minutes between autosaves. The game is saved over the slot this character was last saved to (or loaded from). " +
-                                      "If you are in a vehicle when the time is up, the autosave happens as soon as you get out.",
-                                      new AcceptableValueRange<float>(1f, 120f)));
-            SaveNamingEnabled = Config.Bind("General", "Save naming", true,
-                "Ask for a name when you save (slot menu, ESC menu or a save point). The name replaces \"Manual\" in the slot label and autosaves keep it. Cancel aborts the save. Uses the Apocasetter look when Apocasetter is installed.");
-            WarningSeconds = Config.Bind("General", "Autosave warning (sec)", 30,
-                new ConfigDescription("Show \"Autosave in X sec\" this many seconds before an autosave, then again every 15 seconds. 0 = no warning.",
-                                      new AcceptableValueRange<int>(0, 300)));
-
-            KeepHeldItem = Config.Bind("HeldItem", "KeepHeldItem", true, "Remember the item in your hand when the game is saved and put it back in your hand after loading.");
-            SaveFix = Config.Bind("HeldItem", "SaveFix", true, "Fix the vanilla bug where an item saved while held falls through the world after loading (its colliders are made solid for the duration of the save).");
-            MenuClickFix = Config.Bind("HeldItem", "MenuClickFix", true, "Fix the vanilla bug where clicking any pause-menu button (e.g. Save) drops the item in your hand.");
-            VehiclePartFix = Config.Bind("HeldItem", "VehiclePartFix", true, "Fix the vanilla bug where a held vehicle part (cassette, radio, headlight...) is dropped when the vehicle camera is switched to third person and back.");
-            VerboseHeld = Config.Bind("HeldItem", "VerboseLog", false, "Log the held-item bookkeeping in detail.");
-
+            BindConfig(Config);
             ApplyPatches();
 
             SceneManager.sceneLoaded += OnSceneLoaded;
             EnsureRunner("Awake");
             Log.LogInfo(NAME + " " + VERSION + " loaded. Autosave every " + IntervalMinutes.Value + " min.");
+        }
+
+        /// Bind order = order in the cfg file and in the Apocasetter menu. All held-item fixes are always on (no keys).
+        internal static void BindConfig(ConfigFile cfg)
+        {
+            var orphans = OrphanedEntries(cfg);   // keys read from the cfg that nothing has bound yet (older versions' keys among them)
+            string oldEnabled = null; bool hadNewEnabled = false;
+            if (orphans != null)
+            {
+                orphans.TryGetValue(new ConfigDefinition("General", "Enabled"), out oldEnabled);
+                hadNewEnabled = orphans.ContainsKey(new ConfigDefinition("General", "Autosave enabled"));
+            }
+
+            SaveNamingEnabled = cfg.Bind("General", "Save naming", true,
+                "Ask for a name when you save (slot menu, ESC menu or a save point). The name replaces \"Manual\" in the slot label and autosaves keep it. Cancel aborts the save. Uses the Apocasetter look when Apocasetter is installed.");
+            Enabled = cfg.Bind("General", "Autosave enabled", true, "Save the game automatically (see IntervalMinutes).");
+            IntervalMinutes = cfg.Bind("General", "IntervalMinutes", 10f,
+                new ConfigDescription("Minutes between autosaves. The game is saved over the slot this character was last saved to (or loaded from). " +
+                                      "If you are in a vehicle when the time is up, the autosave happens as soon as you get out.",
+                                      new AcceptableValueRange<float>(1f, 120f)));
+            WarningSeconds = cfg.Bind("General", "Autosave warning (sec)", 30,
+                new ConfigDescription("Show \"Autosave in X sec\" this many seconds before an autosave, then again every 15 seconds. 0 = no warning.",
+                                      new AcceptableValueRange<int>(0, 300)));
+            cfg.Bind("General", "Apocasetter", true, "Show this mod in the Apocasetter Mods menu");
+            MigrateConfig(cfg, orphans, oldEnabled, hadNewEnabled);
+        }
+
+        private static Dictionary<ConfigDefinition, string> OrphanedEntries(ConfigFile cfg)
+        {
+            try
+            {
+                var p = typeof(ConfigFile).GetProperty("OrphanedEntries", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public);
+                return p != null ? p.GetValue(cfg, null) as Dictionary<ConfigDefinition, string> : null;
+            }
+            catch (Exception e) { Log.LogDebug("Config orphans not readable: " + e.Message); return null; }
+        }
+
+        /// 1.8: "Enabled" became "Autosave enabled" (value carried over once) and the [HeldItem] switches are gone (always on);
+        /// the stale keys are dropped from the cfg instead of lingering as orphans.
+        private static void MigrateConfig(ConfigFile cfg, Dictionary<ConfigDefinition, string> orphans, string oldEnabled, bool hadNewEnabled)
+        {
+            try
+            {
+                bool b;
+                if (oldEnabled != null && !hadNewEnabled && bool.TryParse(oldEnabled.Trim(), out b) && b != Enabled.Value) { Enabled.Value = b; Log.LogInfo("Config: Enabled=" + b + " carried over to \"Autosave enabled\""); }
+                if (orphans == null) return;
+                var dead = new List<ConfigDefinition>();
+                foreach (var k in orphans.Keys) if (k.Section == "HeldItem" || (k.Section == "General" && k.Key == "Enabled")) dead.Add(k);
+                if (dead.Count == 0) return;
+                foreach (var k in dead) orphans.Remove(k);
+                cfg.Save();
+                Log.LogInfo("Config: removed " + dead.Count + " key(s) from older versions");
+            }
+            catch (Exception e) { Log.LogWarning("Config migration: " + e.Message); }
         }
 
         /// Each patch class is applied on its own, so one that fails only disables its own feature.
@@ -100,7 +137,9 @@ namespace Apocasaver
         private PlayMakerFSM _inCar;      // Player [InCar] — OnFoot/InCar
         private PlayMakerFSM _health;     // Player [Health] — playerHealth/playerDeath
         private PlayMakerFSM _sleep;      // Player [Sleep] — Awake/...
+        private PlayMakerFSM _newGoSave;  // NewGO_ArrayList [Save_NewGO_ArrayList] — SaveFile var (set by the slot buttons)
         private float _nextScan;
+        private string _slotFile;         // the slot the game will write to; refreshed once a second and around saves/loads, never per frame
 
         private bool _armed;              // saw the game load or save this session → SaveFile is this character's slot
         private float _lastSave;          // realtime of the last save (ours or the game's)
@@ -125,14 +164,12 @@ namespace Apocasaver
             if (now >= _nextScan) { _nextScan = now + 1f; Scan(); }
             if (!Alive(_saveLoad)) { Disarm("SaveLoadGame gone"); _lastState = ""; return; }
 
-            // The slot the game will write to. If it changes for any reason other than the game loading/saving, disarm.
-            string file = SaveFileName();
-            if (file != _armedFile && _armed) Disarm("SaveFile changed to " + file);
-
-            // Watch the game's own save/load flow.
+            // Watch the game's own save/load flow (state changes only; the held-item keeper follows the same changes).
             string st = SafeState(_saveLoad);
             if (st != _lastState)
             {
+                try { HeldItemKeeper.OnSaveLoadState(st); }
+                catch (Exception e) { Plugin.Log.LogWarning("HeldItemKeeper state " + st + ": " + e); }
                 if (st == "SaveGame")
                 {
                     _lastSave = now; Arm("game saved");
@@ -140,7 +177,7 @@ namespace Apocasaver
                     {
                         string kind = Plugin.SaveNamingEnabled.Value && SaveNaming.PendingName != null ? SaveNaming.PendingName : "Manual";
                         SaveNaming.PendingName = null;
-                        StampSlotLabel(SaveFileName(), kind, true);
+                        StampSlotLabel(_slotFile, kind, true);   // fresh: Arm() just refreshed it
                     }
                 }
                 else if (st == "LoadGame" || st == "generateTerrain 2" || st == "LoadVar") { _lastSave = now; Arm("game loaded"); }
@@ -214,20 +251,44 @@ namespace Apocasaver
 
         private void Arm(string why)
         {
-            _armedFile = SaveFileName();
+            _armedFile = RefreshSlotFile();
             if (string.IsNullOrEmpty(_armedFile)) { Disarm("empty SaveFile"); return; }
             if (!_armed) Plugin.Log.LogInfo("Autosave armed (" + why + "), slot file = " + _armedFile);
             _armed = true;
         }
 
-        /// The slot file the game will write to (see HeldItemKeeper.SaveFileCandidates), or null.
+        // ---- current save slot. Looking it up costs a few FSM variable reads, so it is cached (_slotFile) and only
+        // refreshed once a second (Scan) and at the moments that matter: arming, stamping, autosaving, the naming popup.
+
+        /// The slot file the game will write to (fresh lookup), or null.
         internal static string CurrentSaveFile()
         {
-            var c = HeldItemKeeper.SaveFileCandidates();
-            return c.Count > 0 ? c[0] : null;
+            var r = Plugin.Current;
+            return r != null ? r.RefreshSlotFile() : null;
         }
 
-        private string SaveFileName() { return CurrentSaveFile(); }
+        /// All places the game keeps the current save file name; none is right in every phase, so readers try them all.
+        internal static List<string> SaveFileCandidates()
+        {
+            var r = Plugin.Current;
+            return r != null ? r.Candidates() : new List<string>();
+        }
+
+        private string RefreshSlotFile()
+        {
+            var c = Candidates();
+            _slotFile = c.Count > 0 ? c[0] : null;
+            return _slotFile;
+        }
+
+        private List<string> Candidates()
+        {
+            var list = new List<string>(3);
+            try { var p = ES3Settings.defaultSettings.path; if (!string.IsNullOrEmpty(p)) list.Add(Path.GetFileName(p)); } catch { }
+            try { if (Alive(_newGoSave)) { var v = _newGoSave.FsmVariables.GetFsmString("SaveFile"); if (v != null && !string.IsNullOrEmpty(v.Value)) list.Add(v.Value); } } catch { }
+            try { if (Alive(_saveLoad)) { var v = _saveLoad.FsmVariables.GetFsmString("SaveFile"); if (v != null && !string.IsNullOrEmpty(v.Value)) list.Add(v.Value); } } catch { }
+            return list;
+        }
 
         private static bool SlotFileExists(string file)
         {
@@ -241,7 +302,7 @@ namespace Apocasaver
             if (!onFoot || now - _onFootSince < 2f) return false;                    // in a car (or just got out)
             if (Alive(_sleep) && SafeState(_sleep) != "Awake") return false;         // sleeping
             if (!Alive(_saveButton)) return false;
-            string file = SaveFileName();
+            string file = _slotFile;   // refreshed by Scan within the last second
             if (string.IsNullOrEmpty(file) || file != _armedFile) return false;
             if (!SlotFileExists(file)) return false;
             return true;
@@ -256,7 +317,8 @@ namespace Apocasaver
             if (now < _dropWaitUntil) return;
             _dropWaitUntil = -1f;
 
-            string file = SaveFileName();
+            string file = RefreshSlotFile();
+            if (string.IsNullOrEmpty(file) || file != _armedFile) { Disarm("slot changed to " + file); return; }
             Plugin.Log.LogInfo("Autosaving to " + file + " ...");
             try
             {
@@ -359,26 +421,32 @@ namespace Apocasaver
             try { return f.Fsm != null && f.Fsm.Initialized ? f.Fsm.ActiveStateName : ""; } catch { return ""; }
         }
 
-        /// Locate the game FSMs we need (cheap enough once a second; only rescans what is missing).
+        /// Once a second: locate the game FSMs we need (only rescans what is missing), refresh the cached slot file and
+        /// disarm if the slot changed for any reason other than the game loading/saving.
         private void Scan()
         {
             if (!_slotLabelsFitted) _slotLabelsFitted = FitSlotLabels();
-            if (Alive(_saveLoad) && Alive(_saveButton) && Alive(_menu) && Alive(_inCar) && Alive(_health) && Alive(_sleep)) return;
-            var all = Resources.FindObjectsOfTypeAll<PlayMakerFSM>();
-            foreach (var f in all)
+            if (!(Alive(_saveLoad) && Alive(_saveButton) && Alive(_menu) && Alive(_inCar) && Alive(_health) && Alive(_sleep) && Alive(_newGoSave)))
             {
-                if (f == null || f.gameObject == null || !f.gameObject.scene.IsValid()) continue;
-                string go = f.gameObject.name, fsm = f.FsmName;
-                if (!Alive(_saveLoad) && go == "SaveLoadGame" && fsm == "SaveLoadGame") _saveLoad = f;
-                else if (!Alive(_saveButton) && go == "savegame" && fsm == "Continue" && GoPath(f.transform).Contains("SaveGame_Canvas")) _saveButton = f;
-                else if (!Alive(_menu) && go == "__GameManager__" && fsm == "Menu") _menu = f;
-                else if (go == "Player")   // the player root (parented under the vehicle while driving)
+                var all = Resources.FindObjectsOfTypeAll<PlayMakerFSM>();
+                foreach (var f in all)
                 {
-                    if (!Alive(_inCar) && fsm == "InCar") _inCar = f;
-                    else if (!Alive(_health) && fsm == "Health") _health = f;
-                    else if (!Alive(_sleep) && fsm == "Sleep") _sleep = f;
+                    if (f == null || f.gameObject == null || !f.gameObject.scene.IsValid()) continue;
+                    string go = f.gameObject.name, fsm = f.FsmName;
+                    if (!Alive(_saveLoad) && go == "SaveLoadGame" && fsm == "SaveLoadGame") _saveLoad = f;
+                    else if (!Alive(_saveButton) && go == "savegame" && fsm == "Continue" && GoPath(f.transform).Contains("SaveGame_Canvas")) _saveButton = f;
+                    else if (!Alive(_menu) && go == "__GameManager__" && fsm == "Menu") _menu = f;
+                    else if (!Alive(_newGoSave) && go == "NewGO_ArrayList" && fsm == "Save_NewGO_ArrayList") _newGoSave = f;
+                    else if (go == "Player")   // the player root (parented under the vehicle while driving)
+                    {
+                        if (!Alive(_inCar) && fsm == "InCar") _inCar = f;
+                        else if (!Alive(_health) && fsm == "Health") _health = f;
+                        else if (!Alive(_sleep) && fsm == "Sleep") _sleep = f;
+                    }
                 }
             }
+            RefreshSlotFile();
+            if (_armed && _slotFile != _armedFile) Disarm("SaveFile changed to " + _slotFile);
         }
 
         private static string GoPath(Transform t)
@@ -386,6 +454,32 @@ namespace Apocasaver
             var sb = new StringBuilder(t.name);
             while (t.parent != null) { t = t.parent; sb.Insert(0, t.name + "/"); }
             return sb.ToString();
+        }
+    }
+
+    /// The one hook on PlayMaker's event dispatch (it is hot, so one prefix serves both features):
+    ///  * "SaveGame" — the game's save broadcast: earliest reliable moment to make the held item save-safe;
+    ///  * "Clicked" on a save button — Save naming may swallow it and ask for a name first.
+    /// Fsm.ProcessEvent returns void: returning false skips it, which is what swallows the click.
+    [HarmonyPatch(typeof(Fsm), "ProcessEvent")]
+    internal static class Fsm_ProcessEvent_Patch
+    {
+        static bool Prefix(Fsm __instance, FsmEvent fsmEvent)
+        {
+            if (fsmEvent == null) return true;
+            string n = fsmEvent.Name;
+            if (n == "SaveGame")
+            {
+                try { HeldItemKeeper.OnSaveEvent(); }
+                catch (Exception e) { Plugin.Log.LogWarning("Held item on SaveGame event: " + e.Message); }
+                return true;
+            }
+            if (n == "Clicked")
+            {
+                try { return !SaveNaming.Intercept(__instance, fsmEvent); }
+                catch (Exception e) { Plugin.Log.LogWarning("Save naming intercept: " + e.Message); }
+            }
+            return true;
         }
     }
 }
