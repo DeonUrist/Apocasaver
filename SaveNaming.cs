@@ -18,7 +18,8 @@ namespace Apocasaver
     internal static class SaveNaming
     {
         private const int MaxLen = 24;
-        private static readonly Regex StampRx = new Regex(@"^(.*?)\s*\(Seed: [^)]*\)\s*\d\d/\d\d/\d{4} \d\d:\d\d$");
+        // date written as dd/MM/yyyy HH:mm since 1.7.1; labels stamped by 1.7.0 on other regional formats may carry . or - and a . in the time
+        private static readonly Regex StampRx = new Regex(@"^(.*?)\s*\(Seed: [^)]*\)\s*\d\d[./-]\d\d[./-]\d{4} \d\d[:.]\d\d$");
 
         // popup state
         private static bool _open;

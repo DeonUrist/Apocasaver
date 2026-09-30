@@ -16,7 +16,7 @@ namespace Apocasaver
     {
         public const string GUID = "com.denis.apocalypter.apocasaver";
         public const string NAME = "Apocasaver";
-        public const string VERSION = "1.7.0";
+        public const string VERSION = "1.7.1";
 
         internal static ManualLogSource Log;
         internal static ConfigEntry<bool> Enabled;
@@ -331,7 +331,7 @@ namespace Apocasaver
                 string n = m.Groups[1].Value;
                 string seed = "?";
                 try { var sv = _saveLoad.FsmVariables.GetFsmInt("seed"); if (sv != null) seed = sv.Value.ToString(); } catch { }
-                string stamp = kind + " (Seed: " + seed + ") " + DateTime.Now.ToString("dd/MM/yyyy HH:mm");
+                string stamp = kind + " (Seed: " + seed + ") " + DateTime.Now.ToString("dd/MM/yyyy HH:mm", System.Globalization.CultureInfo.InvariantCulture);   // "/" and ":" are culture separators otherwise (30.09.2026 on many PCs)
                 int hits = 0;
                 foreach (var f in Resources.FindObjectsOfTypeAll<PlayMakerFSM>())
                 {
