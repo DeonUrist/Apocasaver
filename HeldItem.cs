@@ -137,7 +137,10 @@ namespace Apocasaver
         internal static void Track(GameObject held)
         {
             if (held == _guarded) return;
-            foreach (var pair in _original) if (pair.Key != null && pair.Key.Fsm != null) pair.Key.Fsm.RestartOnEnable = pair.Value;
+            // On transfer to a pocket, keep the restart flags chosen by Apocapocket (including save normalization).
+            bool pocketOwnsPrevious = _guarded != null && PocketCompatibility.Owns(_guarded);
+            if (!pocketOwnsPrevious)
+                foreach (var pair in _original) if (pair.Key != null && pair.Key.Fsm != null) pair.Key.Fsm.RestartOnEnable = pair.Value;
             _original.Clear();
             _guarded = held;
             if (held == null) return;
@@ -168,6 +171,8 @@ namespace Apocasaver
         {
             float now = Time.unscaledTime;
             if (now >= _nextScan) { _nextScan = now + 1f; Scan(); }
+            // Apocapocket runs early in Update. Release stale custody before vanilla hand actions can use it again.
+            ReleaseStalePocketReference();
             if (_flushAt >= 0f && now >= _flushAt)
             {
                 _flushAt = -1f;
@@ -284,18 +289,41 @@ namespace Apocasaver
         internal static GameObject RawHeldItem()
         {
             if (_grab == null || _grab.gameObject == null || _itemVar == null) return null;
-            string s = SafeState(_grab);
-            if (s != "ItemInHand" && s != "Rotate" && s != "Forward" && s != "Backward" && s != "Grab") return null;
-            return _itemVar.Value;
+            var item = _itemVar.Value;
+            return HeldItemPolicy.PhysicallyHeld(SafeState(_grab), UnderHand(item)) ? item : null;
+        }
+
+        private static bool UnderHand(GameObject item)
+        {
+            if (item == null || _grab == null) return false;
+            var hand = _grab.transform.Find("Hand");
+            return hand != null && item.transform.IsChildOf(hand);
+        }
+
+        private static void ReleaseStalePocketReference()
+        {
+            var item = _itemVar != null ? _itemVar.Value : null;
+            if (item == null || UnderHand(item) || !PocketCompatibility.Owns(item)) return;
+            // Pocket() has custody. Do not send drop/not_Hold: those actions change its colliders/gravity/parent.
+            _itemVar.Value = null;
+            var held = _grab.FsmVariables.GetFsmGameObject("ItemInHand");
+            if (held != null && held.Value == item) held.Value = null;
+            var name = _grab.FsmVariables.GetFsmString("ItemInHandName");
+            if (name != null) name.Value = "";
+            if (HeldItemPolicy.HeldState(SafeState(_grab))) _grab.Fsm.SetState("idle");
+            Plugin.Log.LogInfo("Apocapocket compatibility: released stale GrabItem reference to stored " + item.name);
         }
 
         /// Use vanilla drop for every item, including containers. Rotation/movement must finish before saving.
         internal static DropResult DropHeldItemForSave()
         {
             Scan();
+            ReleaseStalePocketReference();
             var item = RawHeldItem();
             if (item == null) return DropResult.Ready;
-            if (SafeState(_grab) != "ItemInHand") return DropResult.Busy;
+            bool pocketOwned = PocketCompatibility.Owns(item);
+            if (!HeldItemPolicy.CanDrop(SafeState(_grab), UnderHand(item), pocketOwned))
+                return pocketOwned ? DropResult.Ready : DropResult.Busy;
             RestartGuard.Track(null);
             RestoreGrabRestart();
             Plugin.Log.LogInfo("Save: dropping held " + item.name + " through vanilla GrabItem");

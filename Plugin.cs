@@ -17,7 +17,7 @@ namespace Apocasaver
     {
         public const string GUID = "com.denis.apocalypter.apocasaver";
         public const string NAME = "Apocasaver";
-        public const string VERSION = "1.9.0";
+        public const string VERSION = "1.9.1";
 
         internal static ManualLogSource Log;
         internal static ConfigEntry<bool> Enabled;
@@ -324,6 +324,7 @@ namespace Apocasaver
         private bool CanSaveNow(float now, bool onFoot)
         {
             if (!Plugin.AutosaveHooksReady) return false;
+            if (PocketCompatibility.Busy) return false;
             if (!InPlay()) return false;
             if (!onFoot || now - _onFootSince < 2f) return false;                    // in a car (or just got out)
             if (Alive(_sleep) && SafeState(_sleep) != "Awake") return false;         // sleeping
@@ -385,7 +386,7 @@ namespace Apocasaver
             get
             {
                 if (_nativeError != null) throw new IOException(_nativeError);
-                return _globalSaved && _registryFlushed && _playerWritten && _globalWritten && SafeState(_saveLoad) == "isPlay" &&
+                return _globalSaved && _registryFlushed && _playerWritten && _globalWritten && !PocketCompatibility.SaveBusy && SafeState(_saveLoad) == "isPlay" &&
                     SafeState(_newGoSave) == "off" && SafeState(_saveButton) == "off";
             }
         }

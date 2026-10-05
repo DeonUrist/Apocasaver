@@ -5,5 +5,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>disable</Nullable>
   </PropertyGroup>
-  <ItemGroup><Compile Include="..\AutosaveSession.cs" Link="AutosaveSession.cs" /></ItemGroup>
+  <ItemGroup>
+    <Compile Include="..\AutosaveSession.cs" Link="AutosaveSession.cs" />
+    <Compile Include="..\PocketInventoryView.cs" Link="PocketInventoryView.cs" />
+  </ItemGroup>
 </Project>

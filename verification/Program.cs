@@ -86,7 +86,55 @@ static class Program
         Check(game.Begins == 1 && game.Counts.Count == 1, "Repeated scheduling cannot duplicate save");
         session.Cancel(null, true); session.Cancel(null, true);
         Check(game.Ends == 1, "Repeated cancellation is idempotent");
+        PocketChecks();
         Console.WriteLine("PASS: " + _checks + " autosave transaction checks");
+    }
+
+    static void PocketChecks()
+    {
+        var pocket = new PocketFixture(); PocketFixture.Instance = pocket;
+        var view = new PocketInventoryView(typeof(PocketFixture));
+        var first = new PocketObject { Name = "canister" };
+        var last = new PocketObject { Name = "meat" };
+        pocket.Slots[0].Content = first; pocket.Slots[4].Content = last;
+        Check(view.Owns(first) && view.Owns(last), "Protect any pocket slot, not only slot 1");
+        Check(!view.Owns(new PocketObject { Name = "meat" }), "Same item name does not establish pocket ownership");
+        Check(!view.Owns(null) && !view.Busy, "Empty hand and settled inventory are safe");
+        pocket.CurrentOp = new object(); Check(view.Busy, "Wait for pocket selection/storage operation");
+        pocket.CurrentOp = null; pocket.Queued = new object(); Check(view.Busy && !view.SaveBusy, "Queued re-equip blocks a new save but cannot deadlock completion");
+        pocket.Queued = null; pocket.Save.Normalised = true;
+        Check(view.SaveBusy && view.Owns(last), "Ownership survives temporary world placement during saving");
+        pocket.Save.Normalised = false; pocket.Save.Loading = true; Check(view.Busy, "Wait for pocket load restoration");
+        pocket.Save.Loading = false; pocket.Ready = false; Check(view.Busy, "Do not save an uninitialized inventory");
+        pocket.Ready = true;
+        foreach (string state in new[] { "ItemInHand", "Grab", "Rotate", "Forward", "Backward" })
+        {
+            Check(!HeldItemPolicy.PhysicallyHeld(state, false), "Stale grab state/reference without physical custody is not a held item");
+            Check(!HeldItemPolicy.CanDrop(state, false, true), "Stored last-used item is never a drop candidate");
+        }
+        Check(!HeldItemPolicy.PhysicallyHeld("idle", true), "A historical reference is insufficient even under the hand");
+        Check(!HeldItemPolicy.CanDrop("ItemInHand", true, true), "Pocket-owned item is reserved for pocket save normalization");
+        Check(HeldItemPolicy.CanDrop("ItemInHand", true, false), "A loose item genuinely held still uses vanilla drop");
+        Check(!HeldItemPolicy.CanDrop("Rotate", true, false), "Rotation finishes before issuing vanilla drop");
+        pocket.Slots[4].Content = null;
+        Check(!view.Owns(last), "Pocket ownership is released when an item is taken out");
+        PocketFixture.Instance = new PocketFixture();
+        Check(!view.Owns(first) && !view.Busy, "Scene reload reads new runner instead of keeping old inventory ownership");
+        PocketFixture.Instance = null; Check(view.Busy && !view.Owns(last), "Missing pocket runner safely defers autosave");
+    }
+
+    sealed class PocketObject { public string Name; }
+    sealed class PocketSlot { public object Content; }
+    sealed class PocketSave { public bool Loading, Normalised; }
+    sealed class PocketFixture
+    {
+        public static PocketFixture Instance;
+        public readonly PocketSlot[] Slots = Enumerable.Range(0, 6).Select(_ => new PocketSlot()).ToArray();
+        public object CurrentOp;
+        private object _queued;
+        public object Queued { set { _queued = value; } }
+        public readonly PocketSave Save = new();
+        public bool Ready { get; set; } = true;
     }
 
     static void RunSave(AutosaveSession session, Game game, float now)

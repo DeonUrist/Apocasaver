@@ -22,10 +22,13 @@ slots so you can tell autosaves and manual saves apart.
 - **Save naming** (v1.6, on by default since v1.7): a small popup asks for a name before every manual save; the slot then reads `Name (Seed: …) date` and autosaves to that slot keep the name. Cancel aborts the save. With [Apocasetter](../Apocasetter) installed the popup uses its theme and blocks game input while you type; without it, a plain popup.
 - Held items, including crates/boxes, use vanilla drop behavior when saved. There is no hand restoration on load or
   save-time holding/physics override (v1.9).
+- **Apocapocket compatibility** (v1.9.1): autosave waits for pocket operations and loading to finish. Drop detection checks
+  actual hand parenting and slot ownership, so a stored last-used item is not treated as held. Stale references to stored
+  objects are released without running native drop actions. Apocapocket keeps control of its temporary save normalization.
 - **Vehicle-part camera guard**: a held cassette/radio/headlight survives switching the vehicle camera. Guarded FSMs retain
   their state while the camera hierarchy is disabled, and their previous restart flags are restored when the item leaves.
 - Opt-in entry in the [Apocasetter](../Apocasetter) Mods menu (no dependency on it).
-- Light: nothing is looked up per frame; the current save slot is read once a second and around saves.
+- Light: scene scans run at most once a second; normal frames only check cached hand references and pocket custody.
 
 ## Installation
 
@@ -79,10 +82,11 @@ before its final commit, or about 1 s after a manual save.
 
 ## Verification
 
-- `dotnet run --project verification/Verification.csproj -c Release`: 51 transaction checks, including repeated load/autosave
-  cycles, countdown interruption, slot switches, item settling/re-grabbing, native errors, commit errors and timeouts.
+- `dotnet run --project verification/Verification.csproj -c Release`: 76 transaction/compatibility checks, including repeated
+  load/autosave cycles, countdown interruption, slot switches, item settling/re-grabbing, native errors, commit errors,
+  timeouts, stale hand references, slot ownership by identity and pocket operation/save transitions.
 - `powershell.exe -NoProfile -File verification/CheckBindings.ps1`: verifies native hook targets/signatures and the public
-  Apocapocket bridge against the installed game assemblies. It does not run Unity or detour methods outside the game.
+  Apocapocket bridges against the installed game assemblies. It does not run Unity or detour methods outside the game.
 
 The transaction tests use a simulated runtime. The native visual flow and the reported rollback still require an in-game
 replay: save manually, move and autosave, reload, move again and autosave, then reload and confirm the newest position.

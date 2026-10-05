@@ -1,3 +1,18 @@
+# 1.9.1
+
+- Add optional Apocapocket inventory compatibility. Wait for inventory operations and pocket load restoration before saving.
+- Verify physical hand parenting before treating GrabItem's cached `Item` reference as held.
+- Protect pocket-owned objects in every slot, including the last item stored and objects temporarily moved into the world
+  by Apocapocket's save normalization. Release stale native grab references without executing drop actions on stored items.
+- Wait for pocket normalization to finish before completing autosave; queued re-equip operations do not block resuming.
+- Preserve Apocapocket's own vehicle-part restart flags when an item transfers from the hand into its custody.
+
+Validation: clean Release build; 76 simulated transaction/compatibility checks; native hook targets and installed
+Apocapocket inventory bindings verified. Interactive confirmation of the reported last-stored-item case is pending.
+
+Install: replace `BepInEx\plugins\Apocasaver.dll` with the DLL in `Apocasaver-1.9.1.zip`, then restart the game. No Apocapocket
+replacement is required; compatibility bindings were checked against Apocapocket 2.0.4.
+
 # 1.9.0
 
 - Fix autosaves after reloading: synchronize all native save paths and use the selected slot's own save button.

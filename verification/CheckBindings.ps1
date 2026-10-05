@@ -42,6 +42,17 @@ try {
     }
     $pose = $assembly.GetType('Apocasaver.HandPose')
     if ($null -eq $pose.GetMethod('Get', [type[]]@([string])) -or $null -eq $pose.GetMethod('Set', [type[]]@([string], [string]))) { throw 'Apocapocket pose bridge was broken' }
+    $pocketDll = Join-Path $GameDir 'BepInEx\plugins\Apocapocket.dll'
+    if (-not (Test-Path -LiteralPath $pocketDll)) { $pocketDll = Join-Path $GameDir 'BepInEx\plugins\Apocapocket\Apocapocket.dll' }
+    if (Test-Path -LiteralPath $pocketDll) {
+        $pocketAssembly = [Reflection.Assembly]::LoadFrom($pocketDll)
+        $viewType = $assembly.GetType('Apocasaver.PocketInventoryView')
+        $constructor = $viewType.GetConstructor([Reflection.BindingFlags]'Instance,NonPublic', $null, [type[]]@([type]), $null)
+        [void]$constructor.Invoke([object[]]@($pocketAssembly.GetType('Apocapocket.Runner', $true)))
+        $enabled = $pocketAssembly.GetType('Apocapocket.Plugin', $true).GetField('Enabled', [Reflection.BindingFlags]'Static,NonPublic')
+        if ($null -eq $enabled) { throw 'Apocapocket enabled setting is unavailable' }
+        Write-Output 'PASS: installed Apocapocket inventory ownership/operation/save bindings verified'
+    }
     Write-Output 'PASS: 5 native hook targets/signatures and Apocapocket API verified against installed game assemblies'
 } finally {
     [AppDomain]::CurrentDomain.remove_AssemblyResolve($resolveAssembly)
