@@ -17,6 +17,7 @@ namespace Apocasaver
         private static string _current;
         private static bool _frame = true;
         private static float _nextTry;
+        private static Color _normalTextColor = Color.white;
 
         /// frame=false hides the button background art and shows the text alone, tight to the top-left corner.
         public static void Show(string text, float seconds, bool frame)
@@ -24,7 +25,21 @@ namespace Apocasaver
             _hideAt = Time.realtimeSinceStartup + seconds;
             if (!Ensure()) return;
             if (_current != text || _frame != frame) SetText(text, frame);
+            SetColor(_normalTextColor);
             if (!_label.activeSelf) _label.SetActive(true);
+        }
+
+        public static void ShowCountdown(int seconds)
+        {
+            Show("Autosave in " + seconds, 1.2f, false);
+            SetColor(Color.red);
+        }
+
+        private static void SetColor(Color color)
+        {
+            if (_label == null) return;
+            foreach (var tx in _label.GetComponentsInChildren<Text>(true)) tx.color = color;
+            foreach (var tx in _label.GetComponentsInChildren<TMPro.TMP_Text>(true)) tx.color = color;
         }
 
         public static void Hide()
@@ -91,8 +106,8 @@ namespace Apocasaver
                 foreach (var s in go.GetComponentsInChildren<Selectable>(true)) UnityEngine.Object.DestroyImmediate(s);
                 foreach (var g in go.GetComponentsInChildren<Graphic>(true)) g.raycastTarget = false;
                 var cg = go.GetComponent<CanvasGroup>(); if (cg != null) { cg.alpha = 1; cg.interactable = false; cg.blocksRaycasts = false; }
-                foreach (var tx in go.GetComponentsInChildren<Text>(true)) { _caps = Caps(tx.text); tx.horizontalOverflow = HorizontalWrapMode.Overflow; tx.resizeTextForBestFit = false; }
-                foreach (var tx in go.GetComponentsInChildren<TMPro.TMP_Text>(true)) { _caps = Caps(tx.text); tx.enableWordWrapping = false; tx.overflowMode = TMPro.TextOverflowModes.Overflow; tx.enableAutoSizing = false; }
+                foreach (var tx in go.GetComponentsInChildren<Text>(true)) { _normalTextColor = tx.color; _caps = Caps(tx.text); tx.horizontalOverflow = HorizontalWrapMode.Overflow; tx.resizeTextForBestFit = false; }
+                foreach (var tx in go.GetComponentsInChildren<TMPro.TMP_Text>(true)) { _normalTextColor = tx.color; _caps = Caps(tx.text); tx.enableWordWrapping = false; tx.overflowMode = TMPro.TextOverflowModes.Overflow; tx.enableAutoSizing = false; }
 
                 var le = go.GetComponent<LayoutElement>() ?? go.AddComponent<LayoutElement>();
                 le.ignoreLayout = true;

@@ -17,13 +17,14 @@ namespace Apocasaver
     {
         public const string GUID = "com.denis.apocalypter.apocasaver";
         public const string NAME = "Apocasaver";
-        public const string VERSION = "1.8.0";
+        public const string VERSION = "1.9.0";
 
         internal static ManualLogSource Log;
         internal static ConfigEntry<bool> Enabled;
         internal static ConfigEntry<float> IntervalMinutes;
         internal static ConfigEntry<int> WarningSeconds;
         internal static ConfigEntry<bool> SaveNamingEnabled;
+        internal static bool AutosaveHooksReady;
 
         internal static Runner Current;   // the live runner (re-created after scene loads)
         private static GameObject _runnerGo;
@@ -58,7 +59,7 @@ namespace Apocasaver
                                       "If you are in a vehicle when the time is up, the autosave happens as soon as you get out.",
                                       new AcceptableValueRange<float>(1f, 120f)));
             WarningSeconds = cfg.Bind("General", "Autosave warning (sec)", 30,
-                new ConfigDescription("Show \"Autosave in X sec\" this many seconds before an autosave, then again every 15 seconds. 0 = no warning.",
+                new ConfigDescription("Show early autosave reminders this many seconds before saving, then every 15 seconds. 0 disables early reminders. A red 5-4-3-2-1 countdown always precedes autosave.",
                                       new AcceptableValueRange<int>(0, 300)));
             cfg.Bind("General", "Apocasetter", true, "Show this mod in the Apocasetter Mods menu");
             MigrateConfig(cfg, orphans, oldEnabled, hadNewEnabled);
@@ -97,17 +98,25 @@ namespace Apocasaver
         private void ApplyPatches()
         {
             var harmony = new Harmony(GUID);
+            bool stateHook = false, writeHook = false;
             foreach (var t in typeof(Plugin).Assembly.GetTypes())
             {
                 if (!t.IsDefined(typeof(HarmonyPatch), false)) continue;
-                try { harmony.CreateClassProcessor(t).Patch(); }
+                try
+                {
+                    harmony.CreateClassProcessor(t).Patch();
+                    if (t == typeof(AutosaveStatePatch)) stateHook = true;
+                    if (t == typeof(AutosaveWritePatch)) writeHook = true;
+                }
                 catch (Exception e) { Logger.LogError("Patch " + t.Name + " failed, that feature is inactive: " + e); }
             }
+            AutosaveHooksReady = stateHook && writeHook;
+            if (!AutosaveHooksReady) Logger.LogError("Autosave disabled for this session: native save verification hooks could not be installed");
         }
 
         private void OnSceneLoaded(Scene scene, LoadSceneMode mode)
         {
-            if (_runnerGo != null) { var r = _runnerGo.GetComponent<Runner>(); if (r != null) { r.Disarm("scene loaded: " + scene.name); r.ResetSlotLabelFit(); } }
+            if (_runnerGo != null) { var r = _runnerGo.GetComponent<Runner>(); if (r != null) r.ResetForScene(scene.name); }
             EnsureRunner("sceneLoaded " + scene.name);
         }
 
@@ -123,12 +132,20 @@ namespace Apocasaver
     }
 
     /// Per-frame logic (lives on a hidden GameObject because the game destroys plugin objects on scene load).
-    internal class Runner : MonoBehaviour
+    internal class Runner : MonoBehaviour, IAutosaveRuntime
     {
-        private void Awake() { Plugin.Current = this; }
+        private void Awake() { Plugin.Current = this; _autosave = new AutosaveSession(this); }
         private void OnGUI() { SaveNaming.OnGUI(); }
-        private void LateUpdate() { SaveNaming.LateUpdate(); }
-        private void OnDestroy() { SaveNaming.Abort(); }   // never leave the game paused behind a popup that is gone
+        private void LateUpdate() { SaveNaming.LateUpdate(); _presentation.Tick(); }
+        private void OnDestroy()
+        {
+            string state = SafeState(_saveLoad);
+            bool resume = Alive(_saveLoad) && _saveLoad.gameObject.scene == SceneManager.GetActiveScene() &&
+                (state == "isPlay" || state == "wait" || state == "SaveGame");
+            _autosave.Cancel(null, resume); _presentation.End(resume); SaveNaming.Abort();
+            HeldItemKeeper.ResetForScene();
+            if (Plugin.Current == this) Plugin.Current = null;
+        }
 
         // Game FSMs we watch / drive.
         private PlayMakerFSM _saveLoad;   // SaveLoadGame [SaveLoadGame]  — SaveFile var, state isPlay/SaveGame/LoadGame
@@ -146,10 +163,14 @@ namespace Apocasaver
         private float _onFootSince;       // realtime when the player last got out of a car
         private bool _wasOnFoot;
         private string _lastState = "";
-        private bool _saving;
-        private float _savingSince;
+        private AutosaveSession _autosave;
+        private readonly AutosavePresentation _presentation = new AutosavePresentation();
+        private bool _globalSaved, _registryFlushed, _playerWritten, _globalWritten;
+        private string _nativeError;
+        private string _autosaveFile;
+        private bool _saving { get { return _autosave != null && _autosave.Saving; } }
+        internal bool IsAutosaving { get { return _saving; } }
         private string _armedFile;        // slot file at the moment we armed
-        private float _dropWaitUntil = -1f;   // a held crate was dropped; save once it has left the hand
         private bool _slotLabelsFitted;
         private int _heldErrors;
 
@@ -162,7 +183,7 @@ namespace Apocasaver
             try { HeldItemKeeper.Tick(); }
             catch (Exception e) { if (_heldErrors++ % 600 == 0) Plugin.Log.LogWarning("HeldItemKeeper (" + _heldErrors + "x): " + e); }   // first one, then every 600th
             if (now >= _nextScan) { _nextScan = now + 1f; Scan(); }
-            if (!Alive(_saveLoad)) { Disarm("SaveLoadGame gone"); _lastState = ""; return; }
+            if (!Alive(_saveLoad)) { _autosave.Cancel("SaveLoadGame disappeared", false); Disarm("SaveLoadGame gone"); _lastState = ""; return; }
 
             // Watch the game's own save/load flow (state changes only; the held-item keeper follows the same changes).
             string st = SafeState(_saveLoad);
@@ -180,21 +201,21 @@ namespace Apocasaver
                         StampSlotLabel(_slotFile, kind, true);   // fresh: Arm() just refreshed it
                     }
                 }
-                else if (st == "LoadGame" || st == "generateTerrain 2" || st == "LoadVar") { _lastSave = now; Arm("game loaded"); }
-                else if (st == "Start" || st == "setSeed" || st == "generateTerrain") Disarm("new game (" + st + ")");
+                else if (st == "LoadGame" || st == "generateTerrain 2" || st == "LoadVar") { _autosave.Cancel(null, false); _lastSave = now; Arm("game loaded"); }
+                else if (st == "Start" || st == "setSeed" || st == "generateTerrain") { _autosave.Cancel(null, false); Disarm("new game (" + st + ")"); }
                 if (st == "isPlay" && !_armed && (_lastState == "play" || _lastState == "")) _lastSave = now; // baseline for the "no slot" reminder
-                if (_saving && st == "isPlay" && _lastState == "SaveGame") { _saving = false; StatusLabel.Hide(); Plugin.Log.LogInfo("Autosave finished"); }
                 _lastState = st;
             }
-            if (_saving && now - _savingSince > 30f) { _saving = false; StatusLabel.Hide(); Plugin.Log.LogWarning("Autosave: no SaveGame state seen within 30s, giving up on this one"); }
+            if (!Plugin.Enabled.Value && !_saving) _autosave.Cancel(null, true);
+            _autosave.Tick(now);
 
             bool onFoot = Alive(_inCar) && SafeState(_inCar) == "OnFoot";
             if (onFoot && !_wasOnFoot) _onFootSince = now;
             _wasOnFoot = onFoot;
 
-            if (!Plugin.Enabled.Value || _saving) return;
+            if (!Plugin.Enabled.Value || _autosave.Active) return;
             float remaining = Plugin.IntervalMinutes.Value * 60f - (now - _lastSave);
-            if (remaining > 0f)
+            if (remaining > 5f)
             {
                 WarnCountdown(remaining);
                 return;
@@ -202,6 +223,7 @@ namespace Apocasaver
 
             if (!_armed)
             {
+                if (remaining > 0f) return;
                 // Time for an autosave but this character has never been saved (or loaded): tell the player, retry next interval.
                 if (!InPlay()) return;
                 _lastSave = now;
@@ -211,7 +233,7 @@ namespace Apocasaver
             }
 
             if (!CanSaveNow(now, onFoot)) return;
-            TryAutosave(now);
+            _autosave.Start(now, _armedFile);
         }
 
         // ---- "Autosave in X sec" countdown: at WarningSeconds, then every 15 s, never at 0 ----
@@ -220,7 +242,7 @@ namespace Apocasaver
 
         private void WarnCountdown(float remaining)
         {
-            if (!_armed) return;
+            if (!_armed || !Plugin.AutosaveHooksReady) return;
             int w = Plugin.WarningSeconds.Value;
             if (w <= 0) return;
             if (_warnCycle != _lastSave) { _warnCycle = _lastSave; _warnNext = w; }
@@ -249,10 +271,21 @@ namespace Apocasaver
             _armed = false; _armedFile = null;
         }
 
+        internal void ResetForScene(string name)
+        {
+            _autosave.Cancel(null, false);
+            _presentation.End(false);
+            SaveNaming.Abort(); HeldItemKeeper.ResetForScene();
+            Disarm("scene loaded: " + name);
+            _saveLoad = _saveButton = _menu = _inCar = _health = _sleep = _newGoSave = null;
+            _slotFile = null; _lastState = ""; _nextScan = 0f; _wasOnFoot = false;
+            _slotLabelsFitted = false;
+        }
+
         private void Arm(string why)
         {
             _armedFile = RefreshSlotFile();
-            if (string.IsNullOrEmpty(_armedFile)) { Disarm("empty SaveFile"); return; }
+            if (!IsSlotFile(_armedFile)) { Disarm("invalid SaveFile"); return; }
             if (!_armed) Plugin.Log.LogInfo("Autosave armed (" + why + "), slot file = " + _armedFile);
             _armed = true;
         }
@@ -267,27 +300,19 @@ namespace Apocasaver
             return r != null ? r.RefreshSlotFile() : null;
         }
 
-        /// All places the game keeps the current save file name; none is right in every phase, so readers try them all.
+        /// Only the selected slot is eligible for metadata reads; never fall back to another slot's stale FSM variable.
         internal static List<string> SaveFileCandidates()
         {
             var r = Plugin.Current;
-            return r != null ? r.Candidates() : new List<string>();
+            var file = r != null ? r.RefreshSlotFile() : null;
+            return IsSlotFile(file) ? new List<string> { file } : new List<string>();
         }
 
         private string RefreshSlotFile()
         {
-            var c = Candidates();
-            _slotFile = c.Count > 0 ? c[0] : null;
+            try { _slotFile = ES3Settings.defaultSettings.path; }
+            catch { _slotFile = null; }
             return _slotFile;
-        }
-
-        private List<string> Candidates()
-        {
-            var list = new List<string>(3);
-            try { var p = ES3Settings.defaultSettings.path; if (!string.IsNullOrEmpty(p)) list.Add(Path.GetFileName(p)); } catch { }
-            try { if (Alive(_newGoSave)) { var v = _newGoSave.FsmVariables.GetFsmString("SaveFile"); if (v != null && !string.IsNullOrEmpty(v.Value)) list.Add(v.Value); } } catch { }
-            try { if (Alive(_saveLoad)) { var v = _saveLoad.FsmVariables.GetFsmString("SaveFile"); if (v != null && !string.IsNullOrEmpty(v.Value)) list.Add(v.Value); } } catch { }
-            return list;
         }
 
         private static bool SlotFileExists(string file)
@@ -298,45 +323,129 @@ namespace Apocasaver
 
         private bool CanSaveNow(float now, bool onFoot)
         {
+            if (!Plugin.AutosaveHooksReady) return false;
             if (!InPlay()) return false;
             if (!onFoot || now - _onFootSince < 2f) return false;                    // in a car (or just got out)
             if (Alive(_sleep) && SafeState(_sleep) != "Awake") return false;         // sleeping
-            if (!Alive(_saveButton)) return false;
+            if (!Alive(_saveButton) || !Alive(_newGoSave) || !Alive(_menu) || !Alive(_health) || !Alive(_sleep)) return false;
+            if (SafeState(_saveButton) != "off" || SafeState(_newGoSave) != "off") return false;
             string file = _slotFile;   // refreshed by Scan within the last second
             if (string.IsNullOrEmpty(file) || file != _armedFile) return false;
             if (!SlotFileExists(file)) return false;
             return true;
         }
 
-        private void TryAutosave(float now)
+        internal static bool IsSlotFile(string file)
         {
-            // Holding a crate/box: drop it (vanilla drop) and save half a second later, so the crate and its contents are
-            // saved as world items instead of being handled by the held-item code.
-            try { if (HeldItemKeeper.DropHeldContainerForSave()) { _dropWaitUntil = now + 0.5f; return; } }
-            catch (Exception e) { Plugin.Log.LogWarning("Crate drop before autosave failed: " + e.Message); }
-            if (now < _dropWaitUntil) return;
-            _dropWaitUntil = -1f;
+            return AutosaveSession.IsSlotFile(file);
+        }
 
-            string file = RefreshSlotFile();
-            if (string.IsNullOrEmpty(file) || file != _armedFile) { Disarm("slot changed to " + file); return; }
-            Plugin.Log.LogInfo("Autosaving to " + file + " ...");
-            try
+        bool IAutosaveRuntime.CanBegin(string file)
+        {
+            return Plugin.Enabled.Value && _armed && IsSlotFile(file) && file == _armedFile &&
+                RefreshSlotFile() == file && CanSaveNow(Time.realtimeSinceStartup, Alive(_inCar) && SafeState(_inCar) == "OnFoot");
+        }
+
+        void IAutosaveRuntime.Countdown(int seconds) { StatusLabel.ShowCountdown(seconds); }
+        DropResult IAutosaveRuntime.DropHeldItem() { return HeldItemKeeper.DropHeldItemForSave(); }
+
+        void IAutosaveRuntime.BeginSave(string file)
+        {
+            if (!IsSlotFile(file) || file != _armedFile || RefreshSlotFile() != file) throw new InvalidOperationException("The selected save slot changed");
+            PlayMakerFSM slot = null;
+            string slotName = "save_game_" + file.Substring(8, file.Length - 12);
+            foreach (var f in Resources.FindObjectsOfTypeAll<PlayMakerFSM>())
+                if (Alive(f) && f.gameObject.scene == _saveLoad.gameObject.scene && f.gameObject.name == slotName &&
+                    f.FsmName == "Continue" && GoPath(f.transform).Contains("SaveGame_Canvas")) { slot = f; break; }
+            if (slot == null || !slot.enabled || !slot.gameObject.activeInHierarchy || !slot.Fsm.Initialized)
+                throw new InvalidOperationException("The selected slot button is unavailable");
+            var canvas = slot.GetComponentInParent<Canvas>();
+            GameObject loading = null;
+            foreach (var t in Resources.FindObjectsOfTypeAll<Transform>())
+                if (t != null && t.gameObject.scene == _saveLoad.gameObject.scene && t.name == "LoadingScreen") { loading = t.gameObject; break; }
+            if (canvas == null || loading == null || loading.activeInHierarchy) throw new InvalidOperationException("The save menu or loading screen is unavailable");
+
+            var registryFile = _newGoSave.FsmVariables.GetFsmString("SaveFile");
+            var globalFile = _saveLoad.FsmVariables.GetFsmString("SaveFile");
+            if (registryFile == null || globalFile == null) throw new InvalidOperationException("The game's save slot variables are unavailable");
+            ES3Settings.defaultSettings.path = file;
+            registryFile.Value = globalFile.Value = file;
+            _autosaveFile = file; _globalSaved = _registryFlushed = _playerWritten = _globalWritten = false; _nativeError = null;
+            _lastSave = Time.realtimeSinceStartup;
+            string kind = Plugin.SaveNamingEnabled.Value ? SaveNaming.NameForAutosave(file) ?? "Autosave" : "Autosave";
+            StatusLabel.Hide();
+            _presentation.Begin(_menu, canvas, loading);
+            Plugin.Log.LogInfo("Autosave: native slot " + file + ", all save paths synchronized");
+            slot.SendEvent("Clicked");
+            StampSlotLabel(file, kind, true); // Native slot click writes a bare date; stamp and persist our label afterwards.
+        }
+
+        bool IAutosaveRuntime.SaveComplete
+        {
+            get
             {
-                string kind = "Autosave";
-                if (Plugin.SaveNamingEnabled.Value) { var keep = SaveNaming.NameForAutosave(file); if (keep != null) kind = keep; }
-                StampSlotLabel(file, kind, false);
-                _saveButton.SendEvent("Clicked");
-                _saving = true; _savingSince = now; _lastSave = now;
-                StatusLabel.Show("Autosaving", 30f, true);
-            }
-            catch (Exception e)
-            {
-                Plugin.Log.LogError("Autosave failed: " + e);
-                _lastSave = now; // don't retry every frame
+                if (_nativeError != null) throw new IOException(_nativeError);
+                return _globalSaved && _registryFlushed && _playerWritten && _globalWritten && SafeState(_saveLoad) == "isPlay" &&
+                    SafeState(_newGoSave) == "off" && SafeState(_saveButton) == "off";
             }
         }
 
-        internal void ResetSlotLabelFit() { _slotLabelsFitted = false; }
+        internal void OnNativeStateEntered(Fsm fsm, string state)
+        {
+            if (!_saving) return;
+            if (Alive(_saveLoad) && fsm == _saveLoad.Fsm && state == "SaveGame") _globalSaved = true;
+            if (Alive(_newGoSave) && fsm == _newGoSave.Fsm && state == "store cached file") _registryFlushed = true;
+        }
+
+        internal void OnSaveActionCompleted(ES3PlayMaker.SettingsAction action)
+        {
+            if (!_saving) return;
+            var save = action as ES3PlayMaker.SaveAll;
+            if (save == null || (save.key.Value != "Player" && save.key.Value != "global") || action.GetSettings().path != _autosaveFile) return;
+            if (save.key.Value == "Player" && save.Fsm.GameObject.name == "Player" &&
+                save.Fsm.GameObject.scene == _saveLoad.gameObject.scene) _playerWritten = true;
+            if (save.key.Value == "global" && save.Fsm == _saveLoad.Fsm) _globalWritten = true;
+        }
+
+        internal void OnSaveActionFailed(Exception error)
+        {
+            if (_saving && _nativeError == null) _nativeError = "Native save action failed: " + error.Message;
+        }
+
+        void IAutosaveRuntime.Commit(string file)
+        {
+            if (file != _autosaveFile || RefreshSlotFile() != file ||
+                _newGoSave.FsmVariables.GetFsmString("SaveFile").Value != file ||
+                _saveLoad.FsmVariables.GetFsmString("SaveFile").Value != file)
+                throw new InvalidOperationException("A save path changed during autosave");
+            var cache = new ES3Settings(file) { location = ES3.Location.Cache };
+            foreach (string key in new[] { "Player", "global", "newGOArray_Items" })
+                if (!ES3.KeyExists(key, cache)) throw new InvalidOperationException("The save cache is missing " + key);
+            if (HandPose.PendingCount > 0) HandPose.Flush(file);
+            const string markerKey = "apocasaver.commit";
+            string marker = Guid.NewGuid().ToString("N");
+            ES3.Save<string>(markerKey, marker, cache);
+            var disk = new ES3Settings(file) { location = ES3.Location.File };
+            ES3.StoreCachedFile(disk);
+            if (!File.Exists(disk.FullPath) || ES3.Load<string>(markerKey, disk) != marker)
+                throw new IOException("The autosave could not be verified on disk");
+            Plugin.Log.LogInfo("Autosave committed and verified: " + disk.FullPath);
+        }
+
+        void IAutosaveRuntime.EndSave(bool success, string error, bool resume)
+        {
+            try { _presentation.End(resume); }
+            catch (Exception e) { Plugin.Log.LogError("Autosave cleanup: " + e); }
+            _autosaveFile = null; _globalSaved = _registryFlushed = _playerWritten = _globalWritten = false; _nativeError = null;
+            StatusLabel.Hide();
+            if (success) { _lastSave = Time.realtimeSinceStartup; Plugin.Log.LogInfo("Autosave finished; native menu closed"); }
+            else if (error != null)
+            {
+                _lastSave = Time.realtimeSinceStartup;
+                Plugin.Log.LogError("Autosave failed: " + error);
+                StatusLabel.Show("Autosave failed", 6f, false);
+            }
+        }
 
         /// The slot date labels ("save N time" / "load N time") have a fixed box sized for a bare date. Let them shrink the
         /// font to fit so the longer autosave stamp stays on one line. Applied to all slots once per scene (harmless for short text).
@@ -347,7 +456,7 @@ namespace Apocasaver
             {
                 foreach (var tx in Resources.FindObjectsOfTypeAll<UnityEngine.UI.Text>())
                 {
-                    if (tx == null || !tx.gameObject.scene.IsValid() || !IsSlotTimeLabel(tx.gameObject.name)) continue;
+                    if (tx == null || tx.gameObject.scene != SceneManager.GetActiveScene() || !IsSlotTimeLabel(tx.gameObject.name)) continue;
                     if (!tx.resizeTextForBestFit)
                     {
                         tx.resizeTextForBestFit = true;
@@ -360,7 +469,7 @@ namespace Apocasaver
                 }
                 foreach (var tx in Resources.FindObjectsOfTypeAll<TMPro.TMP_Text>())
                 {
-                    if (tx == null || !tx.gameObject.scene.IsValid() || !IsSlotTimeLabel(tx.gameObject.name)) continue;
+                    if (tx == null || tx.gameObject.scene != SceneManager.GetActiveScene() || !IsSlotTimeLabel(tx.gameObject.name)) continue;
                     if (!tx.enableAutoSizing)
                     {
                         tx.fontSizeMax = tx.fontSize;
@@ -397,7 +506,7 @@ namespace Apocasaver
                 int hits = 0;
                 foreach (var f in Resources.FindObjectsOfTypeAll<PlayMakerFSM>())
                 {
-                    if (f == null || f.gameObject == null || !f.gameObject.scene.IsValid()) continue;
+                    if (f == null || f.gameObject == null || f.gameObject.scene != SceneManager.GetActiveScene()) continue;
                     if (f.gameObject.name != "save_game_" + n || f.FsmName != "Continue") continue;
                     if (!GoPath(f.transform).Contains("SaveGame_Canvas")) continue;
                     var v = f.FsmVariables.GetFsmString("time");
@@ -431,7 +540,7 @@ namespace Apocasaver
                 var all = Resources.FindObjectsOfTypeAll<PlayMakerFSM>();
                 foreach (var f in all)
                 {
-                    if (f == null || f.gameObject == null || !f.gameObject.scene.IsValid()) continue;
+                    if (f == null || f.gameObject == null || f.gameObject.scene != SceneManager.GetActiveScene()) continue;
                     string go = f.gameObject.name, fsm = f.FsmName;
                     if (!Alive(_saveLoad) && go == "SaveLoadGame" && fsm == "SaveLoadGame") _saveLoad = f;
                     else if (!Alive(_saveButton) && go == "savegame" && fsm == "Continue" && GoPath(f.transform).Contains("SaveGame_Canvas")) _saveButton = f;
@@ -480,6 +589,47 @@ namespace Apocasaver
                 catch (Exception e) { Plugin.Log.LogWarning("Save naming intercept: " + e.Message); }
             }
             return true;
+        }
+    }
+
+    [HarmonyPatch(typeof(Fsm), "EnterState")]
+    internal static class AutosaveStatePatch
+    {
+        static void Postfix(Fsm __instance, FsmState __0)
+        {
+            var runner = Plugin.Current;
+            if (runner != null && __0 != null) runner.OnNativeStateEntered(__instance, __0.Name);
+            if (__instance.Name == "GrabItem")
+            {
+                try { HeldItemKeeper.OnGrabState(__instance); }
+                catch (Exception e) { Plugin.Log.LogWarning("Vehicle-part guard: " + e.Message); }
+            }
+        }
+    }
+
+    [HarmonyPatch]
+    internal static class AutosaveWritePatch
+    {
+        static IEnumerable<System.Reflection.MethodBase> TargetMethods()
+        {
+            yield return AccessTools.Method(typeof(ES3PlayMaker.SaveAll), "Enter");
+            yield return AccessTools.Method(typeof(ES3PlayMaker.Save), "Enter");
+            yield return AccessTools.Method(typeof(ES3PlayMaker.StoreCachedFile), "Enter");
+        }
+
+        static void Postfix(ES3PlayMaker.SettingsAction __instance)
+        {
+            var runner = Plugin.Current;
+            if (runner == null || !runner.IsAutosaving) return;
+            try { runner.OnSaveActionCompleted(__instance); }
+            catch (Exception e) { runner.OnSaveActionFailed(e); }
+        }
+
+        static Exception Finalizer(Exception __exception)
+        {
+            var runner = Plugin.Current;
+            if (__exception != null && runner != null) runner.OnSaveActionFailed(__exception);
+            return __exception;
         }
     }
 }

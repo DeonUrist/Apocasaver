@@ -63,6 +63,7 @@ namespace Apocasaver
             bool slotButton = n.StartsWith("save_game_") && fsm.Name == "Continue";
             bool quickSave = n == "Yes_Save" && fsm.Name == "Continue";
             if (!slotButton && !quickSave) return false;
+            if (slotButton && Plugin.Current != null && Plugin.Current.IsAutosaving) return false;
             if (_open) return true;   // already asking; ignore further clicks
 
             // default text = the name this slot already carries
@@ -88,7 +89,7 @@ namespace Apocasaver
             {
                 foreach (var f in Resources.FindObjectsOfTypeAll<PlayMakerFSM>())
                 {
-                    if (f == null || f.gameObject == null || !f.gameObject.scene.IsValid()) continue;
+                    if (f == null || f.gameObject == null || f.gameObject.scene != UnityEngine.SceneManagement.SceneManager.GetActiveScene()) continue;
                     if (f.gameObject.name != "save_game_" + slot || f.FsmName != "Continue") continue;
                     var v = f.FsmVariables.GetFsmString("time");
                     if (v != null) return NameFromLabel(v.Value);
