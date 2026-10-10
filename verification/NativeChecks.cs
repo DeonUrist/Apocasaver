@@ -71,7 +71,26 @@ public class NativeSaveRunner : MonoBehaviour
     {
         var runner = Apocasaver.Plugin.Current; runner.enabled = false;
         Apocasaver.Plugin.Enabled.Value = false; Apocasaver.Plugin.SaveNamingEnabled.Value = false;
-        SaveCoordinator.Initialize(); Check(!SaveCoordinator.RecoveryRequired, "Native patches, terrain bindings and optional participant adapters initialize");
+        var companionInfos = BepInEx.Bootstrap.Chainloader.PluginInfos.Values.Where(p => p.Metadata.GUID == "com.denis.apocalypter.apocapatrol" || p.Metadata.GUID == "com.denis.apocalypter.apocapocket").ToArray();
+        if (companionInfos.Length > 0)
+        {
+            var info = companionInfos[0]; var wrapper = info.Instance;
+            var setter = typeof(BepInEx.PluginInfo).GetProperty("Instance").GetSetMethod(true);
+            setter.Invoke(info, new object[] { null });
+            try
+            {
+                SaveCoordinator.Initialize();
+                Check(!SaveCoordinator.Ready && !SaveCoordinator.RecoveryRequired, "Genuinely pending companion initialization retries without permanent recovery failure");
+            }
+            finally { setter.Invoke(info, new object[] { wrapper }); }
+            foreach (var companion in companionInfos)
+            {
+                var destroyed = companion.Instance;
+                UnityEngine.Object.DestroyImmediate(destroyed);
+                Check(destroyed == null && !ReferenceEquals(destroyed, null), "Reproduce scene-destroyed plugin component with valid managed wrapper: " + companion.Metadata.Name);
+            }
+        }
+        SaveCoordinator.Initialize(); Check(SaveCoordinator.Ready && !SaveCoordinator.RecoveryRequired, "Native patches and companion adapters initialize after native plugin components are destroyed");
         var scene = SceneManager.CreateScene("Save verification"); SceneManager.SetActiveScene(scene);
         var refs = new GameObject("Easy Save 3 Manager").AddComponent<ES3ReferenceMgr>();
         var manager = new GameObject("SaveLoadGame"); var main = Fsm(manager, "SaveLoadGame", "isPlay", "SaveGame");

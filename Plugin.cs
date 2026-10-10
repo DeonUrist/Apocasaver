@@ -19,7 +19,7 @@ namespace Apocasaver
     {
         public const string GUID = "com.denis.apocalypter.apocasaver";
         public const string NAME = "Apocasaver";
-        public const string VERSION = "2.0.0";
+        public const string VERSION = "2.0.1";
 
         internal static ManualLogSource Log;
         internal static ConfigEntry<bool> Enabled;
@@ -593,6 +593,8 @@ namespace Apocasaver
         {
             if (fsmEvent == null) return true;
             string n = fsmEvent.Name;
+            if (n == "LoadGame" || n == "Clicked" && __instance.GameObject != null && __instance.GameObject.name.StartsWith("load_game_"))
+            { SaveCoordinator.Initialize(); if (!SaveCoordinator.Ready) return false; }
             if (SaveCoordinator.RecoveryRequired && (n == "LoadGame" || n == "Clicked" && __instance.GameObject != null && __instance.GameObject.name.StartsWith("load_game_"))) return false;
             if (SaveCoordinator.Active && n == "Clicked" && __instance.GameObject != null && __instance.GameObject.name.StartsWith("load_game_")) return false;
             if (n == "SaveGame")

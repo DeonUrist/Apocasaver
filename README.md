@@ -2,10 +2,13 @@
 
 **Safe save rebuilding, autosave, save naming and optional world cleanup** for Apocalypter (BepInEx 5 plugin).
 
-Version **2.0.0** rebuilds every supported manual save and autosave from a fresh cache. Occupied slots are backed up before
+Version **2.0.1** rebuilds every supported manual save and autosave from a fresh cache. Occupied slots are backed up before
 replacement; failed saves restore the previous file, cache and slot label. Useful location history follows the current
 playthrough into both old and new slots. Vehicle hinges use stable reference keys, preventing old rotation records from
 accumulating as a vehicle moves. Unknown legacy/mod records are retained conservatively.
+
+2.0.1 fixes 2.0.0's false startup "Save participant is still loading" / recovery warning after the game destroys a companion
+plugin component. Its persistent runner remains supported; real loading delays are retried without a permanent failure latch.
 
 Saves the game at a configurable interval into the slot the current character was last saved to or loaded from, and stamps the save
 slots so you can tell autosaves and manual saves apart.

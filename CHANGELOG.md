@@ -1,3 +1,14 @@
+# 2.0.1
+
+- Fix the false startup error "Save participant is still loading" when the game destroys Apocapatrol/Apocapocket's native
+  plugin components while their managed wrappers and persistent runners remain available. Resolve bindings from the managed
+  wrapper using CLR reference identity instead of Unity's overloaded null comparison.
+- Defer genuinely pending companion initialization and retry on later frames; do not permanently latch recovery failure.
+- Report integration-binding failures separately from damaged/missing backup recovery failures.
+- Add native regression tests for destroyed companion components and temporarily unconstructed plugin instances.
+
+Validation: clean Release build, 91 automated checks, 27 native no-companion checks and 39 native companion checks.
+
 # 2.0.0
 
 - Rebuild supported manual/automatic saves from an empty ES3 cache; verified backups, staged writes, rollback and startup

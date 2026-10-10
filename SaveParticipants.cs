@@ -18,6 +18,7 @@ namespace Apocasaver
         private static Type _pocketRun, _patrolStore, _marker, _trailers;
         private static FieldInfo _pocketInstance, _pocketSave, _pocketEnabled, _markerAll, _entered;
         private static bool _resolved;
+        internal static bool Ready { get { Resolve(); return _resolved; } }
         internal static bool PatrolLoaded { get { Resolve(); return _patrolStore != null; } }
         internal static IList Markers { get { Resolve(); return _markerAll == null ? null : (IList)_markerAll.GetValue(null); } }
         internal static object PocketSave { get { var run = _pocketInstance == null ? null : _pocketInstance.GetValue(null); return run == null ? null : _pocketSave.GetValue(run); } }
@@ -30,11 +31,16 @@ namespace Apocasaver
         internal static void Resolve()
         {
             if (_resolved) return;
+            // Unity can destroy the plugin's native Component while its managed wrapper,
+            // static configuration and persistent runner remain valid. Unity's == null
+            // tests native lifetime, not whether Chainloader has constructed the plugin.
+            foreach (var plugin in Chainloader.PluginInfos.Values)
+                if ((plugin.Metadata.GUID == "com.denis.apocalypter.apocapocket" || plugin.Metadata.GUID == "com.denis.apocalypter.apocapatrol") &&
+                    ReferenceEquals(plugin.Instance, null)) return;
             var harmony = new Harmony(Plugin.GUID + ".participants");
             foreach (var plugin in Chainloader.PluginInfos.Values)
             {
                 if (plugin.Metadata.GUID != "com.denis.apocalypter.apocapocket" && plugin.Metadata.GUID != "com.denis.apocalypter.apocapatrol") continue;
-                if (plugin.Instance == null) throw new InvalidOperationException("Save participant is still loading: " + plugin.Metadata.GUID);
                 var assembly = plugin.Instance.GetType().Assembly;
                 if (plugin.Metadata.GUID == "com.denis.apocalypter.apocapocket")
                 {

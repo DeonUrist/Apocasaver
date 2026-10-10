@@ -18,6 +18,7 @@ namespace Apocasaver
         internal static string LastFile, LastError;
         internal static string LastFailureCause;
         internal static bool LastSuccess;
+        internal static bool Ready { get { return _initialized && !RecoveryRequired; } }
         private static SaveDiskTransaction _disk;
         private static Dictionary<string, ES3Data> _history = new Dictionary<string, ES3Data>(), _oldCache;
         private static Dictionary<string, RecordKind> _kinds = new Dictionary<string, RecordKind>();
@@ -46,14 +47,16 @@ namespace Apocasaver
         internal static void Initialize()
         {
             if (_initialized) return;
-            _initialized = true;
+            bool recovering = false;
             try
             {
                 if (!SaveRecords.Ready) throw new MissingFieldException("Installed Easy Save cache layout is unsupported");
-                SaveParticipants.Resolve();
+                if (!SaveParticipants.Ready) return; // temporary startup state: retry on a later frame
+                _initialized = true;
                 Plugin.Log.LogDebug("Save participants resolved; installing terrain history hooks");
                 WorldHistory.Install();
                 Plugin.Log.LogDebug("Terrain history hooks installed; checking recovery journals");
+                recovering = true;
                 if (Directory.Exists(BackupRoot)) foreach (string journal in Directory.GetFiles(BackupRoot, "undo.bin", SearchOption.AllDirectories))
                 {
                     string dir = Path.GetDirectoryName(journal);
@@ -64,7 +67,12 @@ namespace Apocasaver
                     StatusLabel.Show("Interrupted save recovered from backup", 12, true);
                 }
             }
-            catch (Exception e) { RecoveryRequired = true; Plugin.Log.LogError("Save recovery/bindings failed: " + e); StatusLabel.Show("Saving unavailable: recovery needs attention", 30, true); }
+            catch (Exception e)
+            {
+                _initialized = true; RecoveryRequired = true;
+                Plugin.Log.LogError((recovering ? "Save backup recovery failed: " : "Save integration initialization failed: ") + e);
+                StatusLabel.Show(recovering ? "Saving unavailable: backup recovery needs attention" : "Saving unavailable: save integration is incompatible", 30, true);
+            }
         }
         private static bool AllowedRecoveryPath(string path)
         {
@@ -89,7 +97,8 @@ namespace Apocasaver
         {
             Initialize();
             if (!Active) { LastFile = file; LastSuccess = false; LastError = null; }
-            if (Active || RecoveryRequired || !Plugin.AutosaveHooksReady || !AutosaveSession.IsSlotFile(file))
+            if (!Ready && !RecoveryRequired) { Warn("Saving deferred: companion mods are still initializing"); return false; }
+            if (Active || !Ready || !Plugin.AutosaveHooksReady || !AutosaveSession.IsSlotFile(file))
             { Warn("Saving could not start: save bindings, slot or recovery are unavailable"); return false; }
             try
             {
@@ -207,7 +216,7 @@ namespace Apocasaver
         internal static bool HasSession { get { return _initialized && (_source != null || _loadFile == null); } }
         internal static void Tick()
         {
-            Initialize(); if (!Active) return;
+            Initialize(); if (!Ready || !Active) return;
             try
             {
                 if (Time.realtimeSinceStartup >= _deadline) throw new TimeoutException("The game's save did not finish within 60 seconds");
