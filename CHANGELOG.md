@@ -1,3 +1,21 @@
+# 2.0.0
+
+- Rebuild supported manual/automatic saves from an empty ES3 cache; verified backups, staged writes, rollback and startup
+  recovery cover the slot, its label and supported companion sidecars. Keep three successful pre-save backups per slot.
+- Preserve source-playthrough location history and opaque mod data across slots; avoid importing the overwritten target's
+  previous world. Capture/reapply static site state around terrain removal/reuse.
+- Replace moving/local-position vehicle hinge save keys with stable reference keys and retain legacy loading fallback.
+- Add `CleanSaves` (off by default): distant abandoned disposable remains/packs and, with Apocapatrol, unclaimed patrol
+  vehicles, their attached crew/cargo/parts and generated detached items. Protect handled, stored, owned, merchant/unique
+  and referenced objects. Apply destruction only after successful commit; failed saves restore exclusions.
+- Coordinate Apocapatrol 2.7.0 sidecars/embedded state and Apocapocket 2.0.7 mapping verification. Mirror file-only ES3 writes
+  into the new cache. Fence patrol construction and cleanup until the transaction finishes.
+- Validate all required records and staged raw records; detect world registration/terrain changes and native writer errors.
+- Fix build reference resolution so old DLLs in verification runtimes cannot override explicit game/plugin references.
+
+Validation: clean Release build; 91 filesystem/policy/compatibility checks; isolated native Unity fixture runs with and
+without companion mods. Full interactive/long-session gameplay validation remains pending; see docs/2.0.0-verification.md.
+
 # 1.9.1
 
 - Add optional Apocapocket inventory compatibility. Wait for inventory operations and pocket load restoration before saving.

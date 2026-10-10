@@ -6,7 +6,10 @@
     <Nullable>disable</Nullable>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Remove="NativeChecks.cs" />
     <Compile Include="..\AutosaveSession.cs" Link="AutosaveSession.cs" />
     <Compile Include="..\PocketInventoryView.cs" Link="PocketInventoryView.cs" />
+    <Compile Include="..\SaveDiskTransaction.cs" Link="SaveDiskTransaction.cs" />
+    <Compile Include="..\CleanPolicy.cs" Link="CleanPolicy.cs" />
   </ItemGroup>
 </Project>

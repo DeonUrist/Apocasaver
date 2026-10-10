@@ -13,17 +13,20 @@ using UnityEngine.SceneManagement;
 namespace Apocasaver
 {
     [BepInPlugin(GUID, NAME, VERSION)]
+    [BepInDependency("com.denis.apocalypter.apocapocket", BepInDependency.DependencyFlags.SoftDependency)]
+    [BepInDependency("com.denis.apocalypter.apocapatrol", BepInDependency.DependencyFlags.SoftDependency)]
     public class Plugin : BaseUnityPlugin
     {
         public const string GUID = "com.denis.apocalypter.apocasaver";
         public const string NAME = "Apocasaver";
-        public const string VERSION = "1.9.1";
+        public const string VERSION = "2.0.0";
 
         internal static ManualLogSource Log;
         internal static ConfigEntry<bool> Enabled;
         internal static ConfigEntry<float> IntervalMinutes;
         internal static ConfigEntry<int> WarningSeconds;
         internal static ConfigEntry<bool> SaveNamingEnabled;
+        internal static ConfigEntry<bool> CleanSaves;
         internal static bool AutosaveHooksReady;
 
         internal static Runner Current;   // the live runner (re-created after scene loads)
@@ -53,6 +56,8 @@ namespace Apocasaver
 
             SaveNamingEnabled = cfg.Bind("General", "Save naming", true,
                 "Ask for a name when you save (slot menu, ESC menu or a save point). The name replaces \"Manual\" in the slot label and autosaves keep it. Cancel aborts the save. Uses the Apocasetter look when Apocasetter is installed.");
+            CleanSaves = cfg.Bind("Saving", "CleanSaves", false,
+                "Remove unclaimed disposable remains and, when Apocapatrol is loaded, abandoned patrol vehicles, crew and items over 1 km away for 10 minutes when saving. Player-handled/stored items, player-owned patrols, reusable vanilla containers and world progress are kept. Objects are removed only after a successful verified save.");
             Enabled = cfg.Bind("General", "Autosave enabled", true, "Save the game automatically (see IntervalMinutes).");
             IntervalMinutes = cfg.Bind("General", "IntervalMinutes", 10f,
                 new ConfigDescription("Minutes between autosaves. The game is saved over the slot this character was last saved to (or loaded from). " +
@@ -98,7 +103,7 @@ namespace Apocasaver
         private void ApplyPatches()
         {
             var harmony = new Harmony(GUID);
-            bool stateHook = false, writeHook = false;
+            bool stateHook = false, writeHook = false, cacheHook = false, actionHook = false, loadHook = false, eventHook = false, fileHook = false;
             foreach (var t in typeof(Plugin).Assembly.GetTypes())
             {
                 if (!t.IsDefined(typeof(HarmonyPatch), false)) continue;
@@ -107,10 +112,15 @@ namespace Apocasaver
                     harmony.CreateClassProcessor(t).Patch();
                     if (t == typeof(AutosaveStatePatch)) stateHook = true;
                     if (t == typeof(AutosaveWritePatch)) writeHook = true;
+                    if (t == typeof(SavePathPatch)) cacheHook = true;
+                    if (t == typeof(SaveActionPatch)) actionHook = true;
+                    if (t == typeof(SaveLoadKeyPatch)) loadHook = true;
+                    if (t == typeof(Fsm_ProcessEvent_Patch)) eventHook = true;
+                    if (t == typeof(SaveFilePatch)) fileHook = true;
                 }
                 catch (Exception e) { Logger.LogError("Patch " + t.Name + " failed, that feature is inactive: " + e); }
             }
-            AutosaveHooksReady = stateHook && writeHook;
+            AutosaveHooksReady = stateHook && writeHook && cacheHook && actionHook && loadHook && eventHook && fileHook;
             if (!AutosaveHooksReady) Logger.LogError("Autosave disabled for this session: native save verification hooks could not be installed");
         }
 
@@ -136,9 +146,10 @@ namespace Apocasaver
     {
         private void Awake() { Plugin.Current = this; _autosave = new AutosaveSession(this); }
         private void OnGUI() { SaveNaming.OnGUI(); }
-        private void LateUpdate() { SaveNaming.LateUpdate(); _presentation.Tick(); }
+        private void LateUpdate() { SaveNaming.LateUpdate(); _presentation.Tick(); if (SaveCoordinator.Active) Time.timeScale = 0; }
         private void OnDestroy()
         {
+            SaveCoordinator.Fail("Scene/runner ended during saving", false);
             string state = SafeState(_saveLoad);
             bool resume = Alive(_saveLoad) && _saveLoad.gameObject.scene == SceneManager.GetActiveScene() &&
                 (state == "isPlay" || state == "wait" || state == "SaveGame");
@@ -165,11 +176,12 @@ namespace Apocasaver
         private string _lastState = "";
         private AutosaveSession _autosave;
         private readonly AutosavePresentation _presentation = new AutosavePresentation();
-        private bool _globalSaved, _registryFlushed, _playerWritten, _globalWritten;
-        private string _nativeError;
         private string _autosaveFile;
         private bool _saving { get { return _autosave != null && _autosave.Saving; } }
         internal bool IsAutosaving { get { return _saving; } }
+        internal string SessionSlot { get { return _armed ? _armedFile : null; } }
+        internal int WorldSeed { get { return Alive(_saveLoad) && _saveLoad.FsmVariables.GetFsmInt("seed") != null ? _saveLoad.FsmVariables.GetFsmInt("seed").Value : 0; } }
+        internal bool NativeSaveFinished { get { return Alive(_saveLoad) && Alive(_newGoSave) && Alive(_saveButton) && SafeState(_saveLoad) == "isPlay" && SafeState(_newGoSave) == "off" && SafeState(_saveButton) == "off" && !PocketCompatibility.SaveBusy; } }
         private string _armedFile;        // slot file at the moment we armed
         private bool _slotLabelsFitted;
         private int _heldErrors;
@@ -183,6 +195,8 @@ namespace Apocasaver
             try { HeldItemKeeper.Tick(); }
             catch (Exception e) { if (_heldErrors++ % 600 == 0) Plugin.Log.LogWarning("HeldItemKeeper (" + _heldErrors + "x): " + e); }   // first one, then every 600th
             if (now >= _nextScan) { _nextScan = now + 1f; Scan(); }
+            SaveCoordinator.Tick();
+            CleanWorld.Tick(InPlay());
             if (!Alive(_saveLoad)) { _autosave.Cancel("SaveLoadGame disappeared", false); Disarm("SaveLoadGame gone"); _lastState = ""; return; }
 
             // Watch the game's own save/load flow (state changes only; the held-item keeper follows the same changes).
@@ -193,13 +207,7 @@ namespace Apocasaver
                 catch (Exception e) { Plugin.Log.LogWarning("HeldItemKeeper state " + st + ": " + e); }
                 if (st == "SaveGame")
                 {
-                    _lastSave = now; Arm("game saved");
-                    if (!_saving)   // the player saved (slot menu, ESC menu or a save point)
-                    {
-                        string kind = Plugin.SaveNamingEnabled.Value && SaveNaming.PendingName != null ? SaveNaming.PendingName : "Manual";
-                        SaveNaming.PendingName = null;
-                        StampSlotLabel(_slotFile, kind, true);   // fresh: Arm() just refreshed it
-                    }
+                    // The shared coordinator arms/stamps only after durable commit, for manual and automatic saves.
                 }
                 else if (st == "LoadGame" || st == "generateTerrain 2" || st == "LoadVar") { _autosave.Cancel(null, false); _lastSave = now; Arm("game loaded"); }
                 else if (st == "Start" || st == "setSeed" || st == "generateTerrain") { _autosave.Cancel(null, false); Disarm("new game (" + st + ")"); }
@@ -273,6 +281,7 @@ namespace Apocasaver
 
         internal void ResetForScene(string name)
         {
+            SaveCoordinator.Fail("Scene changed during saving", false);
             _autosave.Cancel(null, false);
             _presentation.End(false);
             SaveNaming.Abort(); HeldItemKeeper.ResetForScene();
@@ -323,6 +332,7 @@ namespace Apocasaver
 
         private bool CanSaveNow(float now, bool onFoot)
         {
+            if (SaveCoordinator.Active || SaveCoordinator.RecoveryRequired) return false;
             if (!Plugin.AutosaveHooksReady) return false;
             if (PocketCompatibility.Busy) return false;
             if (!InPlay()) return false;
@@ -371,13 +381,14 @@ namespace Apocasaver
             if (registryFile == null || globalFile == null) throw new InvalidOperationException("The game's save slot variables are unavailable");
             ES3Settings.defaultSettings.path = file;
             registryFile.Value = globalFile.Value = file;
-            _autosaveFile = file; _globalSaved = _registryFlushed = _playerWritten = _globalWritten = false; _nativeError = null;
+            _autosaveFile = file;
             _lastSave = Time.realtimeSinceStartup;
             string kind = Plugin.SaveNamingEnabled.Value ? SaveNaming.NameForAutosave(file) ?? "Autosave" : "Autosave";
             StatusLabel.Hide();
             _presentation.Begin(_menu, canvas, loading);
             Plugin.Log.LogInfo("Autosave: native slot " + file + ", all save paths synchronized");
             slot.SendEvent("Clicked");
+            if (!SaveCoordinator.Active) throw new IOException(SaveCoordinator.LastError ?? "Save rebuild did not start");
             StampSlotLabel(file, kind, true); // Native slot click writes a bare date; stamp and persist our label afterwards.
         }
 
@@ -385,66 +396,42 @@ namespace Apocasaver
         {
             get
             {
-                if (_nativeError != null) throw new IOException(_nativeError);
-                return _globalSaved && _registryFlushed && _playerWritten && _globalWritten && !PocketCompatibility.SaveBusy && SafeState(_saveLoad) == "isPlay" &&
-                    SafeState(_newGoSave) == "off" && SafeState(_saveButton) == "off";
+                if (!SaveCoordinator.Active && SaveCoordinator.LastFile == _autosaveFile && !SaveCoordinator.LastSuccess && SaveCoordinator.LastError != null) throw new IOException(SaveCoordinator.LastError);
+                return !SaveCoordinator.Active && SaveCoordinator.LastFile == _autosaveFile && SaveCoordinator.LastSuccess;
             }
         }
 
         internal void OnNativeStateEntered(Fsm fsm, string state)
         {
-            if (!_saving) return;
-            if (Alive(_saveLoad) && fsm == _saveLoad.Fsm && state == "SaveGame") _globalSaved = true;
-            if (Alive(_newGoSave) && fsm == _newGoSave.Fsm && state == "store cached file") _registryFlushed = true;
         }
 
         internal void OnSaveActionCompleted(ES3PlayMaker.SettingsAction action)
         {
-            if (!_saving) return;
-            var save = action as ES3PlayMaker.SaveAll;
-            if (save == null || (save.key.Value != "Player" && save.key.Value != "global") || action.GetSettings().path != _autosaveFile) return;
-            if (save.key.Value == "Player" && save.Fsm.GameObject.name == "Player" &&
-                save.Fsm.GameObject.scene == _saveLoad.gameObject.scene) _playerWritten = true;
-            if (save.key.Value == "global" && save.Fsm == _saveLoad.Fsm) _globalWritten = true;
         }
 
         internal void OnSaveActionFailed(Exception error)
         {
-            if (_saving && _nativeError == null) _nativeError = "Native save action failed: " + error.Message;
+            SaveCoordinator.ReportError(error);
         }
 
         void IAutosaveRuntime.Commit(string file)
         {
-            if (file != _autosaveFile || RefreshSlotFile() != file ||
-                _newGoSave.FsmVariables.GetFsmString("SaveFile").Value != file ||
-                _saveLoad.FsmVariables.GetFsmString("SaveFile").Value != file)
-                throw new InvalidOperationException("A save path changed during autosave");
-            var cache = new ES3Settings(file) { location = ES3.Location.Cache };
-            foreach (string key in new[] { "Player", "global", "newGOArray_Items" })
-                if (!ES3.KeyExists(key, cache)) throw new InvalidOperationException("The save cache is missing " + key);
-            if (HandPose.PendingCount > 0) HandPose.Flush(file);
-            const string markerKey = "apocasaver.commit";
-            string marker = Guid.NewGuid().ToString("N");
-            ES3.Save<string>(markerKey, marker, cache);
-            var disk = new ES3Settings(file) { location = ES3.Location.File };
-            ES3.StoreCachedFile(disk);
-            if (!File.Exists(disk.FullPath) || ES3.Load<string>(markerKey, disk) != marker)
-                throw new IOException("The autosave could not be verified on disk");
-            Plugin.Log.LogInfo("Autosave committed and verified: " + disk.FullPath);
+            if (file != SaveCoordinator.LastFile || !SaveCoordinator.LastSuccess) throw new IOException("Save rebuild did not commit");
         }
 
         void IAutosaveRuntime.EndSave(bool success, string error, bool resume)
         {
+            if (!success) SaveCoordinator.Fail(error ?? "Autosave canceled", resume);
             try { _presentation.End(resume); }
             catch (Exception e) { Plugin.Log.LogError("Autosave cleanup: " + e); }
-            _autosaveFile = null; _globalSaved = _registryFlushed = _playerWritten = _globalWritten = false; _nativeError = null;
-            StatusLabel.Hide();
+            _autosaveFile = null;
+            if (success) StatusLabel.Hide();
             if (success) { _lastSave = Time.realtimeSinceStartup; Plugin.Log.LogInfo("Autosave finished; native menu closed"); }
             else if (error != null)
             {
                 _lastSave = Time.realtimeSinceStartup;
                 Plugin.Log.LogError("Autosave failed: " + error);
-                StatusLabel.Show("Autosave failed", 6f, false);
+                StatusLabel.Show(SaveCoordinator.LastError ?? "Autosave failed", 12f, true);
             }
         }
 
@@ -565,6 +552,34 @@ namespace Apocasaver
             while (t.parent != null) { t = t.parent; sb.Insert(0, t.name + "/"); }
             return sb.ToString();
         }
+
+        internal void StampCommitted(string file, string kind)
+        {
+            string key = "saveTime" + file.Substring(8, file.Length - 12);
+            string stamp = kind + " (Seed: " + WorldSeed + ") " + DateTime.Now.ToString("dd/MM/yyyy HH:mm", System.Globalization.CultureInfo.InvariantCulture);
+            var disk = new ES3Settings("SaveSettings.es3") { location = ES3.Location.File };
+            ES3.Save(key, stamp, disk);
+            if (ES3.Load<string>(key, disk) != stamp) throw new IOException("Slot label could not be verified");
+            ES3.Save(key, stamp, new ES3Settings("SaveSettings.es3") { location = ES3.Location.Cache });
+            StampSlotLabel(file, kind, false); SaveNaming.PendingName = null;
+        }
+        internal void SaveCommitted(string file) { _lastSave = Time.realtimeSinceStartup; Arm("verified save rebuilt"); }
+        internal void AbortNativeSave()
+        {
+            foreach (var f in new[] { _newGoSave, _saveButton }) if (Alive(f) && f.Fsm.Initialized) f.Fsm.SetState("off");
+            if (Alive(_saveLoad) && _saveLoad.Fsm.Initialized) _saveLoad.Fsm.SetState("isPlay");
+        }
+        internal void RestoreSlotText(string file, string label)
+        {
+            string number = file.Substring(8, file.Length - 12), name = "save_game_" + number;
+            foreach (var f in Resources.FindObjectsOfTypeAll<PlayMakerFSM>()) if (Alive(f) && f.gameObject.name == name)
+            {
+                var v = f.FsmVariables.GetFsmString("time"); if (v != null) v.Value = label;
+                var root = f.transform.parent ?? f.transform;
+                foreach (var t in root.GetComponentsInChildren<UnityEngine.UI.Text>(true)) if (t.gameObject.name == "save " + number + " time") t.text = label;
+                foreach (var t in root.GetComponentsInChildren<TMPro.TMP_Text>(true)) if (t.gameObject.name == "save " + number + " time") t.text = label;
+            }
+        }
     }
 
     /// The one hook on PlayMaker's event dispatch (it is hot, so one prefix serves both features):
@@ -578,16 +593,19 @@ namespace Apocasaver
         {
             if (fsmEvent == null) return true;
             string n = fsmEvent.Name;
+            if (SaveCoordinator.RecoveryRequired && (n == "LoadGame" || n == "Clicked" && __instance.GameObject != null && __instance.GameObject.name.StartsWith("load_game_"))) return false;
+            if (SaveCoordinator.Active && n == "Clicked" && __instance.GameObject != null && __instance.GameObject.name.StartsWith("load_game_")) return false;
             if (n == "SaveGame")
             {
+                if (__instance.Name == "SaveLoadGame" && !SaveCoordinator.Active && !SaveCoordinator.Begin(Runner.CurrentSaveFile(), Plugin.Current != null && Plugin.Current.IsAutosaving)) return false;
                 try { HeldItemKeeper.OnSaveEvent(); }
                 catch (Exception e) { Plugin.Log.LogWarning("Held item on SaveGame event: " + e.Message); }
                 return true;
             }
             if (n == "Clicked")
             {
-                try { return !SaveNaming.Intercept(__instance, fsmEvent); }
-                catch (Exception e) { Plugin.Log.LogWarning("Save naming intercept: " + e.Message); }
+                try { if (SaveNaming.Intercept(__instance, fsmEvent)) return false; return SaveCoordinator.InterceptClick(__instance); }
+                catch (Exception e) { Plugin.Log.LogError("Save interception failed: " + e); return false; }
             }
             return true;
         }
@@ -598,6 +616,7 @@ namespace Apocasaver
     {
         static void Postfix(Fsm __instance, FsmState __0)
         {
+            if (__0 != null) SaveCoordinator.OnState(__instance, __0.Name);
             var runner = Plugin.Current;
             if (runner != null && __0 != null) runner.OnNativeStateEntered(__instance, __0.Name);
             if (__instance.Name == "GrabItem")
@@ -620,6 +639,7 @@ namespace Apocasaver
 
         static void Postfix(ES3PlayMaker.SettingsAction __instance)
         {
+            if (__instance is ES3PlayMaker.StoreCachedFile) SaveCoordinator.Stored(__instance);
             var runner = Plugin.Current;
             if (runner == null || !runner.IsAutosaving) return;
             try { runner.OnSaveActionCompleted(__instance); }
@@ -628,6 +648,7 @@ namespace Apocasaver
 
         static Exception Finalizer(Exception __exception)
         {
+            if (__exception != null) SaveCoordinator.ReportError(__exception);
             var runner = Plugin.Current;
             if (__exception != null && runner != null) runner.OnSaveActionFailed(__exception);
             return __exception;

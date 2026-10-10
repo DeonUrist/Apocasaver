@@ -16,10 +16,11 @@ namespace Apocasaver
             _resolved = true;
             foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
             {
-                if (assembly.GetName().Name != "Apocapocket") continue;
+                var runner = assembly.GetType("Apocapocket.Runner", false);
+                if (runner == null) continue;
                 try
                 {
-                    _view = new PocketInventoryView(assembly.GetType("Apocapocket.Runner", true));
+                    _view = new PocketInventoryView(runner);
                     _enabled = assembly.GetType("Apocapocket.Plugin", true).GetField("Enabled", BindingFlags.Static | BindingFlags.NonPublic);
                     if (_enabled == null) throw new MissingFieldException("Apocapocket.Plugin", "Enabled");
                     Plugin.Log.LogInfo("Apocapocket compatibility: pocket ownership and inventory transitions detected");

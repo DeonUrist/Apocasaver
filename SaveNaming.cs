@@ -172,6 +172,7 @@ namespace Apocasaver
             try
             {
                 fsm.Event(evt);
+                if (SaveCoordinator.RejectedFrame == Time.frameCount || SaveCoordinator.RecoveryRequired) return;
                 // Both save buttons react to Clicked with a global transition into "clicked"; make sure it happened.
                 if (fsm.ActiveStateName != "clicked")
                 {

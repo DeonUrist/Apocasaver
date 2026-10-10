@@ -7,4 +7,5 @@ mcs -nostdlib -noconfig -target:library -langversion:7 -optimize+ -out:${1:-Apoc
   -r:$M/UnityEngine.dll -r:$M/UnityEngine.CoreModule.dll -r:$M/UnityEngine.PhysicsModule.dll -r:$M/UnityEngine.IMGUIModule.dll \
   -r:$M/UnityEngine.TextRenderingModule.dll -r:$M/UnityEngine.UI.dll -r:$M/UnityEngine.UIModule.dll \
   -r:$M/Unity.TextMeshPro.dll -r:$M/PlayMaker.dll -r:$M/Assembly-CSharp.dll -r:$M/Assembly-CSharp-firstpass.dll \
-  Plugin.cs StatusLabel.cs HeldItem.cs SaveNaming.cs AutosaveSession.cs AutosavePresentation.cs PocketCompatibility.cs PocketInventoryView.cs
+  Plugin.cs StatusLabel.cs HeldItem.cs SaveNaming.cs AutosaveSession.cs AutosavePresentation.cs PocketCompatibility.cs PocketInventoryView.cs \
+  AssemblyInfo.cs SaveDiskTransaction.cs SaveRecords.cs SaveCoordinator.cs SaveParticipants.cs SaveHooks.cs WorldHistory.cs CleanPolicy.cs CleanWorld.cs

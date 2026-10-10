@@ -87,6 +87,7 @@ static class Program
         session.Cancel(null, true); session.Cancel(null, true);
         Check(game.Ends == 1, "Repeated cancellation is idempotent");
         PocketChecks();
+        RebuildChecks.Run(Check);
         Console.WriteLine("PASS: " + _checks + " autosave transaction checks");
     }
 

@@ -93,6 +93,11 @@ namespace Apocasaver
             catch (Exception e) { Plugin.Log.LogWarning("ES3 save (cache) " + key + ": " + e.Message); }
             try { ES3.Save<string>(key, value, Settings(file, ES3.Location.File)); ok = true; }
             catch (Exception e) { Plugin.Log.LogWarning("ES3 save (file) " + key + ": " + e.Message); }
+            if (SaveCoordinator.Active)
+            {
+                try { var cache = Settings(file, ES3.Location.Cache); ok = ES3.KeyExists(key, cache) && ES3.Load<string>(key, cache) == value; }
+                catch { ok = false; }
+            }
             return ok;
         }
 
@@ -156,6 +161,7 @@ namespace Apocasaver
     /// Drives the held-item logic; ticked every frame by Apocasaver's Runner, which also reports SaveLoadGame state changes.
     internal static class HeldItemKeeper
     {
+        internal static void CancelMetadataSave() { _flushAt = -1; _saveActive = _saveStateSeen = false; _pendingFile = null; }
         private static PlayMakerFSM _grab;
         private static FsmGameObject _itemVar;
         private static float _nextScan, _nextPoll, _flushAt = -1f;

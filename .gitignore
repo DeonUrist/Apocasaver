@@ -10,3 +10,6 @@ obj/
 # BepInEx / game artefacts
 LogOutput.log
 *.cfg
+verification/runtime*/
+verification/results/
+verification/*-diag.log

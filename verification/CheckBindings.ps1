@@ -19,10 +19,20 @@ try {
     $harmonyAssembly = [Reflection.Assembly]::LoadFrom((Join-Path $coreDir '0Harmony.dll'))
     $assembly = [Reflection.Assembly]::LoadFrom((Resolve-Path -LiteralPath $PluginDll))
     $patches = @($assembly.GetTypes() | Where-Object { $_.IsDefined($harmonyAssembly.GetType('HarmonyLib.HarmonyPatch'), $false) })
-    if ($patches.Count -ne 3) { throw "Expected 3 patch classes, found $($patches.Count)" }
+    if ($patches.Count -ne 7) { throw "Expected 7 patch classes, found $($patches.Count)" }
     $flags = [Reflection.BindingFlags]'Static,NonPublic'
     $declaredTargets = @($assembly.GetType('Apocasaver.AutosaveWritePatch').GetMethod('TargetMethods', $flags).Invoke($null, @()))
     if ($declaredTargets.Count -ne 3) { throw 'Native writer hooks are missing' }
+    foreach ($patchName in @('Apocasaver.SaveActionPatch','Apocasaver.SaveLoadKeyPatch')) {
+        $extraTargets = @($assembly.GetType($patchName).GetMethod('TargetMethods', $flags).Invoke($null, @()))
+        if ($extraTargets.Count -ne 2 -or ($extraTargets | Where-Object { $null -eq $_ -or $null -eq $_.GetMethodBody() })) { throw "Save/load key targets missing: $patchName" }
+    }
+    $commitTarget = $assembly.GetType('Apocasaver.SaveFilePatch').GetMethod('TargetMethod', $flags).Invoke($null, @())
+    if ($commitTarget.Name -ne 'CommitBackup' -or $commitTarget.GetParameters().Count -ne 1) { throw 'Staged file mirroring signature mismatch' }
+    $firstpass = [Reflection.Assembly]::LoadFrom((Join-Path $managedDir 'Assembly-CSharp-firstpass.dll'))
+    foreach ($fieldName in @('cache','dirty','syncWithFile')) {
+        if ($null -eq $firstpass.GetType('ES3File').GetField($fieldName, [Reflection.BindingFlags]'Instance,NonPublic')) { throw "Cache field missing: $fieldName" }
+    }
     $runtimeTypes = @(
         @('PlayMaker', 'HutongGames.PlayMaker.Fsm', 'ProcessEvent'),
         @('PlayMaker', 'HutongGames.PlayMaker.Fsm', 'EnterState'),
@@ -53,7 +63,19 @@ try {
         if ($null -eq $enabled) { throw 'Apocapocket enabled setting is unavailable' }
         Write-Output 'PASS: installed Apocapocket inventory ownership/operation/save bindings verified'
     }
-    Write-Output 'PASS: 5 native hook targets/signatures and Apocapocket API verified against installed game assemblies'
+    $patrolDll = Join-Path $GameDir 'BepInEx\plugins\Apocapatrol\Apocapatrol.dll'
+    if (Test-Path -LiteralPath $patrolDll) {
+        $patrol = [Reflection.Assembly]::LoadFrom($patrolDll)
+        $store = $patrol.GetType('Apocapatrol.PatrolPersistence', $true)
+        foreach ($fieldName in @('_pendingSlot','_pendingData','_flushAt','_lastState')) {
+            if ($null -eq $store.GetField($fieldName, [Reflection.BindingFlags]'Static,NonPublic')) { throw "Patrol field missing: $fieldName" }
+        }
+        foreach ($methodName in @('Save','FlushPending','Deserialize','TryPath')) {
+            if ($null -eq $store.GetMethod($methodName, [Reflection.BindingFlags]'Static,NonPublic')) { throw "Patrol method missing: $methodName" }
+        }
+        Write-Output 'PASS: installed Apocapatrol persistence/sidecar bindings verified'
+    }
+    Write-Output 'PASS: native save/load/mirroring/cache bindings and companion APIs verified against installed assemblies'
 } finally {
     [AppDomain]::CurrentDomain.remove_AssemblyResolve($resolveAssembly)
 }

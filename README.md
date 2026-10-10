@@ -1,6 +1,11 @@
 # Apocasaver
 
-**Autosave** and **Save naming** for Apocalypter (BepInEx 5 plugin).
+**Safe save rebuilding, autosave, save naming and optional world cleanup** for Apocalypter (BepInEx 5 plugin).
+
+Version **2.0.0** rebuilds every supported manual save and autosave from a fresh cache. Occupied slots are backed up before
+replacement; failed saves restore the previous file, cache and slot label. Useful location history follows the current
+playthrough into both old and new slots. Vehicle hinges use stable reference keys, preventing old rotation records from
+accumulating as a vehicle moves. Unknown legacy/mod records are retained conservatively.
 
 Saves the game at a configurable interval into the slot the current character was last saved to or loaded from, and stamps the save
 slots so you can tell autosaves and manual saves apart.
@@ -9,6 +14,21 @@ slots so you can tell autosaves and manual saves apart.
 
 - Autosave every *N* minutes (default 10) to the character's current slot. It only fires while actually playing: no menu open,
   alive, awake, on foot for ≥ 2 s, time not paused. If the interval elapses while driving, it saves shortly after you get out.
+- Verified backup and disk staging for manual and automatic saves, with a persistent recovery journal. Startup restores
+  interrupted saves before loading an affected slot. The last three successful pre-save backups are kept per slot under
+  the game's save directory, `Apocasaver/Backups`; unresolved recovery backups are never pruned.
+- Location spawn/visited/resource state is captured before terrain objects are removed or reused and carried to the new
+  save. A smaller save does not require forgetting cleared locations. New and occupied destinations use the same source
+  playthrough history, rather than inheriting the destination's previous character.
+- Optional **CleanSaves**, off by default: removes audited non-resource remains and exhausted disposable packs over 1 km
+  away for 10 minutes of active gameplay. When Apocapatrol is loaded, it also removes abandoned unclaimed patrol vehicle
+  assemblies, crew/cargo and generated detached items. Player-entered patrols, handled/stored items, reusable vanilla
+  containers, resource carcasses, merchant/unique objects and uncertain ownership are protected. Objects referenced by
+  retained persistent state are kept. Removal happens only after the save and participant files verify; failure restores
+  the original object registration lists without destroying the candidates.
+- Optional adapters for **Apocapatrol 2.7.0** and **Apocapocket 2.0.7** coordinate their delayed writes. Patrol sidecars and
+  embedded snapshots agree before commit; failed saves cancel delayed writes and restore the sidecar. No replacement of
+  either companion mod is needed. Unsupported companion bindings block replacement with a warning.
 - A red **5 → 4 → 3 → 2 → 1** countdown precedes every autosave. If you enter a menu/vehicle or stop being eligible, the
   countdown restarts when you can save again.
 - Drops the held item with vanilla GrabItem and gives it 0.75 seconds of live physics before pausing.
@@ -45,6 +65,9 @@ Config: `BepInEx\config\com.denis.apocalypter.apocasaver.cfg`, section `[General
 | `Autosave warning (sec)` | `30` | Early reminders every 15 s. `0` disables early reminders. The final red five-second countdown always runs |
 | `Apocasetter` | `true` | Show in the Apocasetter Mods menu |
 
+Section `[Saving]`: `CleanSaves = false`. Enable it to remove the abandoned objects described above during successful saves.
+The 1 km / 10 minute thresholds are fixed in this version. Apocapatrol's own normal gameplay cleanup remains independent.
+
 The held-item fixes have no switches since 1.8 (the old `[HeldItem]` section is removed from the file automatically).
 
 ## Building
@@ -64,7 +87,9 @@ After the countdown and vanilla item drop, an autosave synchronizes `SaveLoadGam
 `NewGO_ArrayList/Save_NewGO_ArrayList.SaveFile`, enters the pause menu, and sends `Clicked` to `save_game_N/Continue`.
 The slot's existing custom name is preserved. The loading-screen copy contains visual components only, so it cannot execute
 load actions. Save callbacks verify new `Player` and `global` writes, the registry cache flush, and both FSMs' completion.
-The selected cache is then explicitly stored to disk and a unique commit marker is read back before gameplay resumes.
+The selected cache is then explicitly stored to a staged file. Every record is read back and compared, along with the unique
+commit marker, before the slot and companion files are published and gameplay resumes. File-only ES3 mod writes are mirrored
+into the fresh cache so the final flush cannot erase them. The transaction also applies to manual saves when autosave is off.
 Timeouts/errors restore the pause/UI state and report failure. Scene changes clear cached game references and cancel the
 transaction without overriding the new scene's time scale. If verification hooks cannot be installed, autosave stays inactive
 and logs the reason.
@@ -78,15 +103,21 @@ protects `CheckTag`/`LockPhysics` and keeps GrabItem's state across a camera swi
 `Apocasaver.HandPose` (`Get(name)` / `Set(name, "x,y,z,qx,qy,qz,qw")`) is public so other mods can keep per-item hand poses in the
 save file; [Apocapocket](../Apocapocket) uses it (by reflection, optional) for pocketed items. This API only stores/reads metadata;
 Apocasaver never applies the poses to objects. Reads stay within the selected slot. Queued metadata is flushed into an autosave
-before its final commit, or about 1 s after a manual save.
+before the shared final commit. Metadata callbacks for a failed save are canceled.
 
 ## Verification
 
-- `dotnet run --project verification/Verification.csproj -c Release`: 76 transaction/compatibility checks, including repeated
+- `dotnet run --project verification/Verification.csproj -c Release`: 91 transaction/compatibility/filesystem checks, including repeated
   load/autosave cycles, countdown interruption, slot switches, item settling/re-grabbing, native errors, commit errors,
   timeouts, stale hand references, slot ownership by identity and pocket operation/save transitions.
 - `powershell.exe -NoProfile -File verification/CheckBindings.ps1`: verifies native hook targets/signatures and the public
   Apocapocket bridges against the installed game assemblies. It does not run Unity or detour methods outside the game.
+- `powershell.exe -NoProfile -ExecutionPolicy Bypass -File verification/RunNative.ps1 -NoMods`: native Unity/ES3 fixtures with
+  isolated save paths. Tests fresh/occupied slots, history capture/restoration, hinge key migration/loading, direct-file mod
+  writes, verified commit and injected write-failure rollback.
+- Run the same command without `-NoMods` to load installed Apocapatrol/Apocapocket. It additionally verifies abandoned patrol
+  assemblies/detached items, ownership protection, reversible exclusions, rollback and embedded patrol/sidecar agreement.
 
-The transaction tests use a simulated runtime. The native visual flow and the reported rollback still require an in-game
-replay: save manually, move and autosave, reload, move again and autosave, then reload and confirm the newest position.
+The native tests run the real assemblies and production hooks with constructed FSM/object fixtures; they are not a complete
+interactive playthrough. Long-session gameplay, pooled terrain timing and menu visuals still benefit from an in-game replay.
+See `docs/SAVE_UPGRADE_DESIGN.md` for the design and `docs/2.0.0-verification.md` for validation evidence and remaining limits.
