@@ -160,7 +160,7 @@ namespace Apocasaver
                 Optional(() => { _exclusion = CleanWorld.Plan(); _exclusion.Apply(); }, "CleanSaves planning");
                 _retainedRoots = CleanWorld.Objects();
                 foreach (var root in roots.Where(g => !_exclusion.Objects.Contains(g))) foreach (var f in root.GetComponentsInChildren<PlayMakerFSM>(true))
-                    if (f.enabled && f.Fsm.Initialized && f.Fsm.GlobalTransitions.Any(t => t.FsmEvent.Name == "SaveGame") &&
+                    if (f.isActiveAndEnabled && f.Fsm.Initialized && f.Fsm.Active && f.Fsm.GlobalTransitions.Any(t => t.FsmEvent.Name == "SaveGame") &&
                         f.Fsm.States.Any(s => s.Actions.Any(a => a.Enabled && (a is ES3PlayMaker.Save || a is ES3PlayMaker.SaveAll)))) _expected.Add(f);
                 disk.ResetPrimary();
                 var seed = new Dictionary<string, ES3Data>();
@@ -328,7 +328,9 @@ namespace Apocasaver
                 if (timeout) Diagnostic("Native save completion not confirmed after 60 seconds; writing available data and retaining prior records");
                 if (!_player || !_global || !_cars || !_items || !_storms || !_registry)
                     Diagnostic("Unconfirmed native writes: player=" + _player + ", global=" + _global + ", cars=" + _cars + ", items=" + _items + ", storms=" + _storms + ", registry=" + _registry);
-                foreach (var f in _expected.Where(f => f != null && !_written.Contains(f))) Diagnostic("Unconfirmed object write; retaining prior data: " + f.gameObject.name + "/" + f.FsmName);
+                // Inactive/disabled visual parts do not receive the native SaveGame event.
+                // A part may also be deactivated by the native traversal after Begin.
+                foreach (var f in _expected.Where(f => f != null && f.isActiveAndEnabled && f.Fsm.Active && !_written.Contains(f))) Diagnostic("Unconfirmed object write; retaining prior data: " + f.gameObject.name + "/" + f.FsmName);
                 Commit();
             }
             catch (Exception e)
@@ -435,7 +437,9 @@ namespace Apocasaver
             if (exclusion != null) { try { exclusion.Destroy(); } catch (Exception e) { Diagnostic("Cleanup destruction: " + e); } }
             if (Plugin.Current != null) { try { Plugin.Current.SaveCommitted(file); } catch (Exception e) { Diagnostic("Post-save bookkeeping: " + e); } }
             Plugin.Log.LogInfo("Save written to disk: " + file + (_warnings.Count == 0 ? "" : "; diagnostics=" + _warnings.Count));
-            if (!_automatic) StatusLabel.Show(_warnings.Count == 0 ? "Game saved" : "Save written with warnings; see log", 6, false);
+            // Optional diagnostics belong in the log. Publication succeeded; only an
+            // actual save failure or backup recovery needs an on-screen warning.
+            if (!_automatic) StatusLabel.Show("Game saved", 6, false);
             PruneBackups(file);
         }
         private static void CancelCleanup()

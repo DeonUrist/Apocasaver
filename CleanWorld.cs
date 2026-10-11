@@ -92,7 +92,10 @@ namespace Apocasaver
             if (References(FsmVariables.GlobalVariables, tree)) return true;
             foreach (var f in Resources.FindObjectsOfTypeAll<PlayMakerFSM>())
                 if (f != null && f.gameObject.scene.IsValid() && !tree.Contains(f.gameObject) && f.FsmName != "Save_NewGO_ArrayList" &&
-                    f.Fsm.States.Any(s => s.Actions.Any(a => a is ES3PlayMaker.SaveAll)) && References(f.FsmVariables, tree)) return true;
+                    References(f.FsmVariables, tree) &&
+                    // Never deserialize actions on an uninitialized FSM. An unknown owner with
+                    // a reference protects the candidate until its persistence can be inspected.
+                    (!f.Fsm.Initialized || f.Fsm.States.Any(s => s.Actions.Any(a => a is ES3PlayMaker.SaveAll)))) return true;
             foreach (var p in Resources.FindObjectsOfTypeAll<PlayMakerArrayListProxy>())
                 if (p != null && p.gameObject.scene.IsValid() && p.gameObject.name != "NewGO_ArrayList" && !tree.Contains(p.gameObject) && p.arrayList != null)
                     foreach (var item in p.arrayList) { var go = item as GameObject; if (go != null && tree.Contains(go)) return true; }

@@ -2,12 +2,18 @@
 
 **Safe save rebuilding, autosave, save naming and optional world cleanup** for Apocalypter (BepInEx 5 plugin).
 
-Version **2.0.2** rebuilds supported manual saves and autosaves from a fresh cache. Occupied slots are backed up before
+Version **2.0.3** rebuilds supported manual saves and autosaves from a fresh cache. Occupied slots are backed up before
 replacement; disk write failures restore the previous file, cache and slot label. Useful location history follows the current
 playthrough into both old and new slots. Vehicle hinges use stable reference keys, preventing old rotation records from
 accumulating as a vehicle moves. Unknown legacy/mod records are retained conservatively.
 
-2.0.2 makes save completion checks diagnostic: missing confirmations, optional bindings and cleanup uncertainty do not
+2.0.3 avoids reading actions on uninitialized menu FSMs during cleanup and checks native write confirmations only for
+active parts that can receive SaveGame. Uninitialized external references still protect cleanup candidates. Inactive visual
+parts retain prior records without false missing-write warnings; missing writes from active parts remain diagnostic.
+Optional diagnostics and temporary autosave deferrals stay in the log. A successful manual save shows "Game saved";
+on-screen warnings remain for disk failures and backup recovery. Autosave countdowns and the first-save reminder remain.
+
+Since 2.0.2, save completion checks are diagnostic: missing confirmations, optional bindings and cleanup uncertainty do not
 reject saving. Prior useful records are kept, uncertain cleanup is skipped, and unavailable rebuild integration falls back
 to the game's normal save. Only disk persistence failures reject an attempted write. Includes 2.0.1's destroyed-component fix.
 

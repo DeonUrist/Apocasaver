@@ -1,4 +1,4 @@
-param([string]$GameDir = 'E:\SteamLibrary\steamapps\common\Apocalypter', [switch]$NoMods)
+param([string]$GameDir = 'E:\SteamLibrary\steamapps\common\Apocalypter', [switch]$NoMods, [string]$PocketDll)
 $ErrorActionPreference = 'Stop'
 $taskGame = (Resolve-Path -LiteralPath $GameDir).Path
 $taskRepo = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
@@ -16,7 +16,9 @@ Copy-Item -LiteralPath "$taskRepo\bin\Release\Apocasaver.dll" -Destination "$tas
 Copy-Item -LiteralPath "$PSScriptRoot\bin\Release\net472\ApocasaverNativeVerifier.dll" -Destination "$taskRuntime\BepInEx\plugins" -Force
 if (!$NoMods) {
     foreach ($mod in @('Apocapatrol','Apocapocket')) {
-        $taskModDll = @("$taskGame\BepInEx\plugins\$mod.dll", "$taskGame\BepInEx\plugins\$mod\$mod.dll") | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+        $taskModDll = if ($mod -eq 'Apocapocket' -and $PocketDll) { (Resolve-Path -LiteralPath $PocketDll).Path } else {
+            @("$taskGame\BepInEx\plugins\$mod.dll", "$taskGame\BepInEx\plugins\$mod\$mod.dll") | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+        }
         if (!$taskModDll) { throw "Installed $mod not found" }
         Copy-Item -LiteralPath $taskModDll -Destination "$taskRuntime\BepInEx\plugins" -Force
     }

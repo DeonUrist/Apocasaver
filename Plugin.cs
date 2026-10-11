@@ -19,7 +19,7 @@ namespace Apocasaver
     {
         public const string GUID = "com.denis.apocalypter.apocasaver";
         public const string NAME = "Apocasaver";
-        public const string VERSION = "2.0.2";
+        public const string VERSION = "2.0.3";
 
         internal static ManualLogSource Log;
         internal static ConfigEntry<bool> Enabled;
@@ -454,7 +454,8 @@ namespace Apocasaver
                 _lastSave = Time.realtimeSinceStartup;
                 if (diskFailure) Plugin.Log.LogError("Autosave disk write failed: " + error);
                 else Plugin.Log.LogInfo("Autosave deferred: " + error);
-                StatusLabel.Show(diskFailure ? SaveCoordinator.LastError ?? "Autosave failed to disk" : "Autosave deferred: " + error, 12f, diskFailure);
+                if (diskFailure) StatusLabel.Show(SaveCoordinator.LastError ?? "Autosave failed to disk", 12f, true);
+                else if (!SaveCoordinator.RecoveryRequired) StatusLabel.Hide();
             }
         }
 

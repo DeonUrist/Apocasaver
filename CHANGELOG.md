@@ -1,3 +1,10 @@
+# 2.0.3
+
+- Keep optional save diagnostics and temporary autosave deferrals in the log. Successful manual saves show "Game saved"; disk failures and backup recovery still show on-screen notices.
+- Cleanup no longer deserializes actions on uninitialized menu FSMs. Unknown external references conservatively protect candidate objects.
+- Native object-write checks exclude inactive, disabled and finished FSMs that cannot receive SaveGame; missing writes from active objects still retain prior records and report diagnostics.
+- Added native Unity regressions for uninitialized references, inactive child parts and retained diagnostics for genuinely unconfirmed active writes.
+
 # 2.0.2
 
 - Stop rejecting saves for missing native/object confirmations, FSM states, optional companion bindings, record layout

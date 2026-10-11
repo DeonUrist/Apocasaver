@@ -93,6 +93,7 @@ public class NativeSaveRunner : MonoBehaviour
         SaveCoordinator.Initialize(); Check(SaveCoordinator.Ready && !SaveCoordinator.RecoveryRequired, "Native patches and companion adapters initialize after native plugin components are destroyed");
         var scene = SceneManager.CreateScene("Save verification"); SceneManager.SetActiveScene(scene);
         var refs = new GameObject("Easy Save 3 Manager").AddComponent<ES3ReferenceMgr>();
+        CheckColdCleanupReferences();
         var manager = new GameObject("SaveLoadGame"); var main = Fsm(manager, "SaveLoadGame", "isPlay", "SaveGame");
         var seedVar = new FsmInt { Value = 42 }; seedVar.SetName("seed"); main.FsmVariables.IntVariables = new[] { seedVar }; main.FsmVariables.Reinitialize();
         Action(main, "SaveGame", new ES3PlayMaker.SaveAll { key = "global", saveFsmVariables = true, saveGlobalVariables = false });
@@ -201,12 +202,24 @@ public class NativeSaveRunner : MonoBehaviour
         Set(runner, "_saveButton", null);
         Finish(main, player, reg, destination, () => typeof(SaveCoordinator).GetField("_storms", All).SetValue(null, false));
         Check(SaveCoordinator.LastSuccess && !SaveCoordinator.Active && ES3.KeyExists(car.name, Disk(destination)) && ES3.Load<string>("UsefulDormantState", Disk(destination)) == "keep me", "Missing object/write confirmation, optional binding and save-button FSM do not veto disk save; live object's prior state survives");
+        Check(((HashSet<string>)typeof(SaveCoordinator).GetField("_warnings", All).GetValue(null)).Any(w => w.Contains("Unconfirmed object write") && w.Contains("DormantSave")), "Active object with a genuinely missing write still produces a diagnostic");
         Set(runner, "_saveButton", button);
         Check(ES3.Load<bool>("(7000.0, 0.0, 0.0)", Disk(destination)), "History captured during saving reaches the current disk save");
         Check(SaveCoordinator.Begin(destination, false), "Save without native completion receipt begins");
         typeof(SaveCoordinator).GetField("_deadline", All).SetValue(null, -1f); SaveCoordinator.Tick();
         Check(SaveCoordinator.LastSuccess && ES3.KeyExists("Player", Disk(destination)) && ES3.KeyExists("global", Disk(destination)), "Confirmation timeout writes available cache and retains prior useful session records");
         dormant.Fsm.GlobalTransitions = new FsmTransition[0];
+        var inactivePart = new GameObject("InactiveWheel(Clone)51"); inactivePart.transform.SetParent(car.transform);
+        var inactiveSave = Fsm(inactivePart, "saveItemVar", "off", "save");
+        Action(inactiveSave, "save", new ES3PlayMaker.SaveAll { key = inactivePart.name, saveFsmVariables = true });
+        inactiveSave.Fsm.GlobalTransitions = new[] { new FsmTransition { FsmEvent = FsmEvent.GetFsmEvent("SaveGame"), ToState = "save" } };
+        inactivePart.SetActive(false);
+        Check(SaveCoordinator.Begin(destination, false), "Inactive child part regression begins");
+        var expected = (HashSet<PlayMakerFSM>)typeof(SaveCoordinator).GetField("_expected", All).GetValue(null);
+        Check(!expected.Contains(inactiveSave), "Inactive visual child part is not expected to receive native save event");
+        Finish(main, player, reg, destination);
+        var warnings = (HashSet<string>)typeof(SaveCoordinator).GetField("_warnings", All).GetValue(null);
+        Check(SaveCoordinator.LastSuccess && !warnings.Any(w => w.Contains(inactivePart.name)), "Inactive part does not produce false unconfirmed-write warning");
         Check(SaveCoordinator.Begin(destination, false), "Registry mutation regression begins");
         var lateItem = new GameObject("LateLoot(Clone)50");
         newGo.GetComponents<PlayMakerArrayListProxy>().First(p => p.referenceName == "ArrayList_Items").arrayList.Add(lateItem);
@@ -244,6 +257,29 @@ public class NativeSaveRunner : MonoBehaviour
         if (beforeTick != null) beforeTick(); SaveCoordinator.Tick();
     }
     static bool PocketReady(ref bool __result) { __result = true; return false; }
+    void CheckColdCleanupReferences()
+    {
+        var loot = new GameObject("ColdCleanupTarget");
+        var cold = new GameObject("InactiveLoadButton").AddComponent<PlayMakerFSM>();
+        cold.gameObject.SetActive(false);
+        cold.Fsm.States = new[] { new FsmState(cold.Fsm) { Name = "clicked", Transitions = new FsmTransition[0] } };
+        var owner = new FsmGameObject { Value = loot }; owner.SetName("SavedObject");
+        cold.FsmVariables.GameObjectVariables = new[] { owner };
+        typeof(Fsm).GetField("initialized", All).SetValue(cold.Fsm, false);
+        var inspect = typeof(CleanWorld).GetMethod("ReferencedOutside", All);
+        var errors = new List<string>();
+        Application.LogCallback capture = (message, stack, type) => { if (message.Contains("Fsm not initialized") || type == LogType.Exception) errors.Add(message); };
+        Application.logMessageReceived += capture;
+        try
+        {
+            Check(!cold.Fsm.Initialized, "Cleanup fixture reproduces uninitialized inactive menu FSM");
+            Check((bool)inspect.Invoke(null, new object[] { new HashSet<GameObject> { loot } }), "Uninitialized external reference conservatively protects cleanup target");
+            owner.Value = null;
+            Check(!(bool)inspect.Invoke(null, new object[] { new HashSet<GameObject> { loot } }), "Unrelated uninitialized menu FSM does not prevent cleanup");
+            Check(errors.Count == 0, "Cleanup scan does not deserialize uninitialized actions or emit PlayMaker errors");
+        }
+        finally { Application.logMessageReceived -= capture; UnityEngine.Object.DestroyImmediate(cold.gameObject); UnityEngine.Object.DestroyImmediate(loot); }
+    }
     void PatrolCleanup(PlayMakerFSM main, PlayMakerFSM player, PlayMakerFSM reg, GameObject newGo, string slot)
     {
         var markers = SaveParticipants.Markers;
