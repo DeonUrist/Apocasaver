@@ -80,7 +80,7 @@ public class NativeSaveRunner : MonoBehaviour
             try
             {
                 SaveCoordinator.Initialize();
-                Check(!SaveCoordinator.Ready && !SaveCoordinator.RecoveryRequired, "Genuinely pending companion initialization retries without permanent recovery failure");
+                Check(SaveCoordinator.Begin("SaveGame10.es3", false) && SaveCoordinator.NativeFallback && !SaveCoordinator.Active && !SaveCoordinator.RecoveryRequired, "Pending companion allows native save without reset or permanent recovery failure");
             }
             finally { setter.Invoke(info, new object[] { wrapper }); }
             foreach (var companion in companionInfos)
@@ -155,6 +155,10 @@ public class NativeSaveRunner : MonoBehaviour
         ES3.StoreCachedFile(Disk(destination));
         Check(File.ReadAllBytes(Disk(destination).FullPath).SequenceEqual(committed), "Automatic cache flush cannot rewrite a rolled-back save");
         Check(!SaveCoordinator.RecoveryRequired, "Successful rollback remains playable");
+        Check(SaveCoordinator.Begin(destination, false), "Real disk lock regression begins");
+        using (var diskLock = new FileStream(SaveCoordinator.Redirect(Disk(destination)), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None))
+            Finish(main, player, reg, destination);
+        Check(!SaveCoordinator.Active && !SaveCoordinator.LastSuccess && SaveCoordinator.LastDiskFailure && File.ReadAllBytes(Disk(destination).FullPath).SequenceEqual(committed), "Actual native ES3 disk-lock failure restores byte-exact previous save");
 
         var siteGo = new GameObject("Camp_Verifier"); siteGo.tag = "SpawnerStatic";
         var site = Fsm(siteGo, "saveItemVar", "off", "save", "load");
@@ -185,10 +189,46 @@ public class NativeSaveRunner : MonoBehaviour
         Finish(main, player, reg, fresh);
         Check(SaveCoordinator.LastSuccess && ES3.Load<string>("OpaqueMod", Disk(fresh)) == "source-only" && ES3.Load<bool>("(5000.0, 0.0, 0.0)", Disk(fresh)), "New slot retains same useful source history and mod data");
         Check(!File.Exists(Path.Combine(SaveProbe.Root, "SaveGame1.es3")), "Verifier never touched an unintended slot");
+        var dormant = Fsm(car, "DormantSave", "off", "save");
+        Action(dormant, "save", new ES3PlayMaker.SaveAll { key = car.name, saveFsmVariables = true, saveGlobalVariables = false });
+        dormant.Fsm.GlobalTransitions = new[] { new FsmTransition { FsmEvent = FsmEvent.GetFsmEvent("SaveGame"), ToState = "save" } };
+        ES3Settings.defaultSettings.path = destination; dormant.Fsm.SetState("save");
+        ES3.Save("UsefulDormantState", "keep me", Cache(destination));
+        typeof(SaveCoordinator).GetMethod("LoadSource", All).Invoke(null, new object[] { destination });
+        Check(SaveCoordinator.Begin(destination, false), "Save with unobserved retained object begins");
+        SaveCoordinator.CaptureHistory("(7000.0, 0.0, 0.0)", new ES3Data(typeof(bool), ES3.Serialize(true)));
+        SaveCoordinator.ReportError(new MissingFieldException("injected optional binding"));
+        Set(runner, "_saveButton", null);
+        Finish(main, player, reg, destination, () => typeof(SaveCoordinator).GetField("_storms", All).SetValue(null, false));
+        Check(SaveCoordinator.LastSuccess && !SaveCoordinator.Active && ES3.KeyExists(car.name, Disk(destination)) && ES3.Load<string>("UsefulDormantState", Disk(destination)) == "keep me", "Missing object/write confirmation, optional binding and save-button FSM do not veto disk save; live object's prior state survives");
+        Set(runner, "_saveButton", button);
+        Check(ES3.Load<bool>("(7000.0, 0.0, 0.0)", Disk(destination)), "History captured during saving reaches the current disk save");
+        Check(SaveCoordinator.Begin(destination, false), "Save without native completion receipt begins");
+        typeof(SaveCoordinator).GetField("_deadline", All).SetValue(null, -1f); SaveCoordinator.Tick();
+        Check(SaveCoordinator.LastSuccess && ES3.KeyExists("Player", Disk(destination)) && ES3.KeyExists("global", Disk(destination)), "Confirmation timeout writes available cache and retains prior useful session records");
+        dormant.Fsm.GlobalTransitions = new FsmTransition[0];
+        Check(SaveCoordinator.Begin(destination, false), "Registry mutation regression begins");
+        var lateItem = new GameObject("LateLoot(Clone)50");
+        newGo.GetComponents<PlayMakerArrayListProxy>().First(p => p.referenceName == "ArrayList_Items").arrayList.Add(lateItem);
+        Finish(main, player, reg, destination);
+        Check(SaveCoordinator.LastSuccess && ES3.Load<ES3PlayMaker.PMDataWrapper>("newGOArray_Items", Disk(destination)).array.Contains(lateItem), "Registry mutation refreshes saved arrays without vetoing saving");
+        typeof(SaveCoordinator).GetField("_rebuildAvailable", All).SetValue(null, false);
+        string pendingJournal = Path.Combine(SaveProbe.Root, "Apocasaver", "Backups", destination, "pending-native-fallback");
+        Directory.CreateDirectory(pendingJournal); File.WriteAllText(Path.Combine(pendingJournal, "undo.bin"), "unresolved journal fixture");
+        Check(SaveCoordinator.Begin(destination, false) && SaveCoordinator.NativeFallback && !SaveCoordinator.Active && File.Exists(Disk(destination).FullPath), "Unavailable rebuild integration allows native saving without deleting destination");
+        Finish(main, player, reg, destination);
+        Check(SaveCoordinator.LastSuccess && !SaveCoordinator.NativeFallback && ES3.KeyExists("Player", Disk(destination)), "Native fallback completes a real cache flush to disk");
+        Check(File.Exists(Path.Combine(pendingJournal, "superseded")), "Successful newer native save prevents replay of an older unresolved journal");
+        typeof(SaveCoordinator).GetField("_rebuildAvailable", All).SetValue(null, true);
+        ES3.Save("LateFileOnlyMod", "after save", Disk(destination));
+        Check(ES3.Load<string>("LateFileOnlyMod", Cache(destination)) == "after save", "File-only mod write after commit refreshes source cache");
+        Check(SaveCoordinator.Begin("SaveGame10.es3", false), "Rebuild after delayed mod update begins");
+        Finish(main, player, reg, "SaveGame10.es3");
+        Check(SaveCoordinator.LastSuccess && ES3.Load<string>("LateFileOnlyMod", Disk("SaveGame10.es3")) == "after save", "Delayed useful mod state survives the next save in a new slot");
         if (SaveParticipants.PatrolLoaded) PatrolCleanup(main, player, reg, newGo, destination);
         _report.Add("PASS: Native ES3 serialization, Harmony save hooks, transaction commit and rollback completed.");
     }
-    void Finish(PlayMakerFSM main, PlayMakerFSM player, PlayMakerFSM reg, string slot)
+    void Finish(PlayMakerFSM main, PlayMakerFSM player, PlayMakerFSM reg, string slot, System.Action beforeTick = null)
     {
         main.Fsm.SetState("SaveGame"); player.Fsm.SetState("save");
         if (_hinge != null && !SaveCoordinator.Excluded(_hinge.gameObject)) _hinge.Fsm.SetState("save");
@@ -201,7 +241,7 @@ public class NativeSaveRunner : MonoBehaviour
         }
         Action(reg, "store cached file", new ES3PlayMaker.StoreCachedFile { filePath = slot }); reg.Fsm.SetState("store cached file");
         Action(reg, "off", new HutongGames.PlayMaker.Actions.Wait { time = 0, realTime = true }); reg.Fsm.SetState("off"); main.Fsm.SetState("isPlay");
-        SaveCoordinator.Tick();
+        if (beforeTick != null) beforeTick(); SaveCoordinator.Tick();
     }
     static bool PocketReady(ref bool __result) { __result = true; return false; }
     void PatrolCleanup(PlayMakerFSM main, PlayMakerFSM player, PlayMakerFSM reg, GameObject newGo, string slot)
@@ -226,6 +266,13 @@ public class NativeSaveRunner : MonoBehaviour
         Check(abandoned != null && loose != null && !cars.arrayList.Contains(abandoned) && !markers.Contains(marker), "Cleanup is reversible list exclusion, with objects still alive before commit");
         SaveCoordinator.ReportError(new IOException("cleanup rollback test")); SaveCoordinator.Tick();
         Check(abandoned != null && cargo != null && loose != null && cars.arrayList.Contains(abandoned) && items.arrayList.Contains(cargo) && markers.Contains(marker), "Failed save restores patrol marker and registration lists without destroying objects");
+        Check(SaveCoordinator.Begin(slot, false), "Cleanup with changed protection begins");
+        CleanWorld.Protect(abandoned);
+        Finish(main, player, reg, slot);
+        Check(SaveCoordinator.LastSuccess && abandoned != null && cars.arrayList.Contains(abandoned) && markers.Contains(marker), "Cleanup protection change keeps objects and does not veto save");
+        var savedCars = ES3.Load<ES3PlayMaker.PMDataWrapper>("newGOArray_Cars", Disk(slot));
+        Check(savedCars.array != null && savedCars.array.Contains(abandoned), "Restored cleanup candidate is present in the saved registration array");
+        ((HashSet<string>)typeof(CleanWorld).GetField("Handled", All).GetValue(null)).Remove(abandoned.name);
         Check(SaveCoordinator.Begin(slot, false), "Patrol cleanup retries after rollback"); Finish(main, player, reg, slot);
         Check(SaveCoordinator.LastSuccess, "Patrol cleanup commits matching native and patrol snapshots");
         var store = markerType.Assembly.GetType("Apocapatrol.PatrolPersistence");

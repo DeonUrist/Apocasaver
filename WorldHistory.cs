@@ -56,7 +56,7 @@ namespace Apocasaver
             if (root == null || !SaveCoordinator.HasSession || Capturing || Restoring) return;
             var fsms = SiteFsms(root); if (fsms.Length == 0) return;
             Run(fsms, "Save", false);
-            if (SaveCoordinator.Active) SaveCoordinator.ReportError(new InvalidOperationException("Terrain locations changed during saving; history was preserved, try saving again"));
+            if (SaveCoordinator.Active) SaveCoordinator.Diagnostic("Terrain locations changed during saving; retaining history and skipping cleanup");
         }
         private static void Restore(GameObject root)
         {
@@ -94,7 +94,7 @@ namespace Apocasaver
                 foreach (var fsm in fsms) fsm.SendEvent(evt);
                 if (_error != null) throw _error;
             }
-            catch (Exception e) { Plugin.Log.LogError("Location history capture/restore failed: " + e); SaveCoordinator.RecoveryRequired = true; }
+            catch (Exception e) { SaveCoordinator.Diagnostic("Location history capture/restore unavailable: " + e); }
             finally { ES3Settings.defaultSettings.path = path; ES3Settings.defaultSettings.location = location; ES3File.cachedFiles.Remove(CaptureFile); Capturing = Restoring = false; }
         }
     }

@@ -26,12 +26,14 @@ namespace Apocasaver
         private int _shown;
         internal bool Active { get { return _phase != Phase.Idle; } }
         internal bool Saving { get { return _phase == Phase.Saving; } }
+        internal bool DiskFailure { get; private set; }
 
         internal AutosaveSession(IAutosaveRuntime game) { _game = game; }
 
         internal void Start(float now, string file)
         {
             if (Active || !IsSlotFile(file) || !_game.CanBegin(file)) return;
+            DiskFailure = false;
             _file = file; _phase = Phase.Countdown; _deadline = now + 5f; _shown = 5;
             _game.Countdown(5);
         }
@@ -48,12 +50,11 @@ namespace Apocasaver
             {
                 if (Saving)
                 {
-                    if (_game.SaveComplete)
+                    if (_game.SaveComplete || now >= _deadline)
                     {
                         _game.Commit(_file);
                         Finish(true, null, true);
                     }
-                    else if (now >= _deadline) Finish(false, "The game's save did not finish within 60 seconds", true);
                     return;
                 }
                 if (!_game.CanBegin(_file)) { Finish(false, null, true); return; }
@@ -76,7 +77,7 @@ namespace Apocasaver
                 _phase = Phase.Saving; _deadline = now + 60f;
                 _game.BeginSave(_file);
             }
-            catch (Exception e) { Finish(false, e.Message, true); }
+            catch (Exception e) { DiskFailure = SaveFailurePolicy.IsDiskFailure(e); Finish(false, e.Message, true); }
         }
 
         internal void Cancel(string error, bool resume) { if (Active) Finish(false, error, resume); }

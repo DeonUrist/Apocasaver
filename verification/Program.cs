@@ -77,7 +77,7 @@ static class Program
             session.Start(0, game.Slot); session.Tick(5);
             game.GlobalDone = game.RegistryDone = true;
             session.Tick(failure == "timeout" ? 65 : 6);
-            Check(!session.Active && !game.Paused && !game.LastSuccess, failure + " failure cleans up without false success");
+            Check(!session.Active && !game.Paused && game.LastSuccess == (failure == "timeout"), failure + ": only disk/runtime errors fail; missing confirmation still flushes available data");
             Check(game.Ends == 1, failure + " cleanup runs once");
         }
 

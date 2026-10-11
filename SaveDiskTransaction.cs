@@ -11,7 +11,7 @@ namespace Apocasaver
         internal sealed class Entry
         {
             internal string Target, Backup, Stage, Hash;
-            internal bool Existed;
+            internal bool Existed, Optional;
         }
         internal readonly List<Entry> Files = new List<Entry>();
         internal readonly string DirectoryPath;
@@ -27,11 +27,11 @@ namespace Apocasaver
             Directory.CreateDirectory(DirectoryPath);
         }
         private SaveDiskTransaction(string directory) { DirectoryPath = directory; }
-        internal string Track(string path)
+        internal string Track(string path, bool optional = false)
         {
             if (Prepared) throw new InvalidOperationException("Backup already prepared");
             var entry = new Entry { Target = Path.GetFullPath(path), Existed = File.Exists(path),
-                Backup = Path.Combine(DirectoryPath, "old-" + Files.Count + ".bin"), Stage = Path.Combine(DirectoryPath, "new-" + Files.Count + ".bin") };
+                Backup = Path.Combine(DirectoryPath, "old-" + Files.Count + ".bin"), Stage = Path.Combine(DirectoryPath, "new-" + Files.Count + ".bin"), Optional = optional };
             if (entry.Existed)
             {
                 CopyDurable(entry.Target, entry.Backup); entry.Hash = Hash(entry.Target);
@@ -59,6 +59,7 @@ namespace Apocasaver
         {
             foreach (var f in Files)
             {
+                if (f.Optional && !File.Exists(f.Stage)) continue;
                 if (!File.Exists(f.Stage)) throw new IOException("Participant did not produce " + f.Target);
                 string expected = Hash(f.Stage);
                 CopyDurable(f.Stage, f.Target + ".apocasaver-publish");

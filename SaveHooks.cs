@@ -47,7 +47,7 @@ namespace Apocasaver
     {
         static MethodBase TargetMethod() { return AccessTools.Method(typeof(ES3).Assembly.GetType("ES3Internal.ES3IO", true), "CommitBackup"); }
         static void Postfix(ES3Settings settings) { SaveCoordinator.FileWritten(settings); }
-        static Exception Finalizer(Exception __exception) { if (__exception != null) SaveCoordinator.ReportError(__exception); return __exception; }
+        static Exception Finalizer(Exception __exception) { if (__exception != null) SaveCoordinator.ReportDiskError(__exception); return __exception; }
     }
     [HarmonyPatch]
     internal static class SaveActionPatch
@@ -58,18 +58,22 @@ namespace Apocasaver
         static bool Prefix(ES3PlayMaker.SettingsAction __instance, out State __state)
         {
             __state = new State { Action = __instance };
-            if (SaveCoordinator.RecoveryRequired && AutosaveSession.IsSlotFile(__instance.GetSettings().path) || SaveCoordinator.DeferredLabel(__instance) || SaveCoordinator.Excluded(__instance.Fsm.GameObject)) return false;
+            if (SaveCoordinator.DeferredLabel(__instance) || SaveCoordinator.Excluded(__instance.Fsm.GameObject)) return false;
             if (SaveCoordinator.WriteFailed && !WorldHistory.Capturing) return false;
             var save = __instance as ES3PlayMaker.Save;
             if (save != null && save.value.Type == VariableType.Vector3)
             {
-                string stable = SaveHooks.StableHinge(save.Fsm);
-                if (stable != null) { __state.OldKey = save.key; save.key = new FsmString { Value = stable }; }
+                try
+                {
+                    string stable = SaveHooks.StableHinge(save.Fsm);
+                    if (stable != null) { __state.OldKey = save.key; save.key = new FsmString { Value = stable }; }
+                }
+                catch (Exception e) { SaveCoordinator.Diagnostic("Stable hinge key unavailable; using native key: " + e); }
             }
             __state.Entered = true; return true;
         }
         static void Postfix(ES3PlayMaker.SettingsAction __instance, State __state)
-        { if (__state != null && __state.Entered) SaveCoordinator.Written(__instance); }
+        { if (__state != null && __state.Entered) { try { SaveCoordinator.Written(__instance); } catch (Exception e) { SaveCoordinator.Diagnostic("Save write tracking unavailable: " + e); } } }
         static Exception Finalizer(Exception __exception, State __state)
         {
             if (__state != null && __state.OldKey != null) ((__state.Action as ES3PlayMaker.Save)).key = __state.OldKey;
@@ -85,11 +89,14 @@ namespace Apocasaver
         static bool Prefix(ES3PlayMaker.SettingsAction __instance, out FsmString __state)
         {
             __state = null; var load = __instance as ES3PlayMaker.Load;
-            if (SaveCoordinator.RecoveryRequired && AutosaveSession.IsSlotFile(__instance.GetSettings().path)) return false;
             if (load != null && load.value.Type == VariableType.Vector3)
             {
-                string stable = SaveHooks.StableHinge(load.Fsm);
-                if (stable != null && ES3.KeyExists(stable, load.GetSettings())) { __state = load.key; load.key = new FsmString { Value = stable }; }
+                try
+                {
+                    string stable = SaveHooks.StableHinge(load.Fsm);
+                    if (stable != null && ES3.KeyExists(stable, load.GetSettings())) { __state = load.key; load.key = new FsmString { Value = stable }; }
+                }
+                catch (Exception e) { SaveCoordinator.Diagnostic("Stable hinge load key unavailable; using native key: " + e); }
             }
             if (WorldHistory.Restoring)
             {

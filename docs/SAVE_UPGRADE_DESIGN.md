@@ -1,5 +1,10 @@
 # Apocasaver save rebuild and CleanSaves proposal
 
+**2.0.2 policy correction (11 October 2026):** the original strict validation gates below are superseded. Only disk
+persistence errors fail an attempted write. Missing callbacks, optional compatibility checks, object changes, metadata
+layout checks and completion timeouts are diagnostics. Preserve prior useful records, refresh native registry arrays and
+skip uncertain cleanup. Unavailable rebuild integration uses native saving without deleting the destination or blocking loads.
+
 Research date: 10 October 2026. Proposal only; no production plugin or player save was changed.
 
 ## Recommended behavior

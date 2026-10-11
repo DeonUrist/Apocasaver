@@ -18,6 +18,10 @@ namespace Apocasaver
         internal static string LastFile, LastError;
         internal static string LastFailureCause;
         internal static bool LastSuccess;
+        internal static bool LastDiskFailure;
+        internal static bool NativeFallback;
+        private static bool _fallbackStored;
+        internal static bool NativeFallbackFinished { get { return NativeFallback && _fallbackStored && Plugin.Current != null && Plugin.Current.NativeSaveReturned; } }
         internal static bool Ready { get { return _initialized && !RecoveryRequired; } }
         private static SaveDiskTransaction _disk;
         private static Dictionary<string, ES3Data> _history = new Dictionary<string, ES3Data>(), _oldCache;
@@ -28,10 +32,38 @@ namespace Apocasaver
         private static string _source, _world = Guid.NewGuid().ToString("N"), _kind, _previousPath;
         private static string _loadFile;
         private static float _deadline, _scale;
-        private static bool _player, _global, _cars, _items, _storms, _registry, _automatic, _initialized;
+        private static bool _player, _global, _cars, _items, _storms, _registry, _automatic, _initialized, _rebuildAvailable = true, _conservative;
+        private static readonly HashSet<string> _warnings = new HashSet<string>();
         private static string _writeError;
-        internal static bool WriteFailed { get { return Active && _writeError != null; } }
-        internal static void ReportError(Exception error) { if (Active && _writeError == null) _writeError = error.ToString(); }
+        internal static bool WriteFailed { get { return (Active || NativeFallback) && _writeError != null; } }
+        internal static void ReportError(Exception error)
+        {
+            if (!Active && !NativeFallback) return;
+            if (SaveFailurePolicy.IsDiskFailure(error)) ReportDiskError(error);
+            else Diagnostic("Native save diagnostic: " + SaveFailurePolicy.Unwrap(error));
+        }
+        internal static void ReportDiskError(Exception error)
+        {
+            if ((Active || NativeFallback) && _writeError == null)
+            {
+                _writeError = error.ToString();
+                if (NativeFallback) Warn("Saving failed to disk: " + error.Message);
+            }
+        }
+        internal static void Diagnostic(string message)
+        {
+            if (Active) _conservative = true;
+            if (_warnings.Add(message)) Plugin.Log.LogWarning(message);
+        }
+        internal static bool Optional(Action action, string name)
+        {
+            try { action(); return true; }
+            catch (Exception e)
+            {
+                if (SaveFailurePolicy.IsDiskFailure(e)) throw;
+                Diagnostic(name + ": " + SaveFailurePolicy.Unwrap(e)); return false;
+            }
+        }
         private static readonly HashSet<PlayMakerFSM> _expected = new HashSet<PlayMakerFSM>(), _written = new HashSet<PlayMakerFSM>();
         private static readonly List<Tuple<FsmString, string>> _paths = new List<Tuple<FsmString, string>>();
         private static CleanWorld.Exclusion _exclusion;
@@ -47,31 +79,30 @@ namespace Apocasaver
         internal static void Initialize()
         {
             if (_initialized) return;
-            bool recovering = false;
+            _initialized = true;
             try
             {
                 if (!SaveRecords.Ready) throw new MissingFieldException("Installed Easy Save cache layout is unsupported");
-                if (!SaveParticipants.Ready) return; // temporary startup state: retry on a later frame
-                _initialized = true;
-                Plugin.Log.LogDebug("Save participants resolved; installing terrain history hooks");
-                WorldHistory.Install();
-                Plugin.Log.LogDebug("Terrain history hooks installed; checking recovery journals");
-                recovering = true;
+                try { WorldHistory.Install(); }
+                catch (Exception e) { Diagnostic("Terrain history hooks unavailable; native saving remains available: " + e); _rebuildAvailable = false; }
                 if (Directory.Exists(BackupRoot)) foreach (string journal in Directory.GetFiles(BackupRoot, "undo.bin", SearchOption.AllDirectories))
                 {
                     string dir = Path.GetDirectoryName(journal);
-                    if (File.Exists(Path.Combine(dir, "committed")) || File.Exists(Path.Combine(dir, "recovered"))) continue;
-                    var tx = SaveDiskTransaction.Read(journal, AllowedRecoveryPath);
-                    tx.Rollback(RestoreLabel); ES3File.cachedFiles.Remove(tx.Slot);
-                    Plugin.Log.LogWarning("Recovered interrupted save " + tx.Slot + " from " + dir);
-                    StatusLabel.Show("Interrupted save recovered from backup", 12, true);
+                    if (File.Exists(Path.Combine(dir, "committed")) || File.Exists(Path.Combine(dir, "recovered")) || File.Exists(Path.Combine(dir, "superseded"))) continue;
+                    try
+                    {
+                        var tx = SaveDiskTransaction.Read(journal, AllowedRecoveryPath);
+                        tx.Rollback(RestoreLabel); ES3File.cachedFiles.Remove(tx.Slot);
+                        Plugin.Log.LogWarning("Recovered interrupted save " + tx.Slot + " from " + dir);
+                        StatusLabel.Show("Interrupted save recovered from backup", 12, true);
+                    }
+                    catch (Exception e) { RecoveryRequired = true; _rebuildAvailable = false; Diagnostic("Backup recovery needs attention at " + dir + "; native saving remains available: " + e); }
                 }
             }
             catch (Exception e)
             {
-                _initialized = true; RecoveryRequired = true;
-                Plugin.Log.LogError((recovering ? "Save backup recovery failed: " : "Save integration initialization failed: ") + e);
-                StatusLabel.Show(recovering ? "Saving unavailable: backup recovery needs attention" : "Saving unavailable: save integration is incompatible", 30, true);
+                _rebuildAvailable = false;
+                Diagnostic("Save rebuilding unavailable; native saving remains available: " + e);
             }
         }
         private static bool AllowedRecoveryPath(string path)
@@ -89,22 +120,26 @@ namespace Apocasaver
             if (name.StartsWith("save_game_", StringComparison.Ordinal)) file = "SaveGame" + name.Substring(10) + ".es3";
             else if (name == "Yes_Save") file = Runner.CurrentSaveFile();
             else return true;
-            if (Active || RecoveryRequired || !Begin(file, Plugin.Current != null && Plugin.Current.IsAutosaving))
+            if (Active || !Begin(file, Plugin.Current != null && Plugin.Current.IsAutosaving))
             { RejectedFrame = Time.frameCount; return false; }
             return true;
         }
         internal static bool Begin(string file, bool automatic)
         {
             Initialize();
-            if (!Active) { LastFile = file; LastSuccess = false; LastError = null; }
-            if (!Ready && !RecoveryRequired) { Warn("Saving deferred: companion mods are still initializing"); return false; }
-            if (Active || !Ready || !Plugin.AutosaveHooksReady || !AutosaveSession.IsSlotFile(file))
-            { Warn("Saving could not start: save bindings, slot or recovery are unavailable"); return false; }
+            if (Active) return false;
+            LastFile = file; LastSuccess = false; LastDiskFailure = false; LastError = null; NativeFallback = false; _fallbackStored = false;
+            _writeError = null;
+            _warnings.Clear(); _conservative = false;
+            if (!_rebuildAvailable || !Plugin.AutosaveHooksReady || !AutosaveSession.IsSlotFile(file))
+                return UseNative("Rebuild integration unavailable");
             try
             {
-                if (PocketCompatibility.Busy) throw new InvalidOperationException("Pocket inventory is busy; try saving again when it finishes");
-                SaveParticipants.Drain();
+                if (!SaveParticipants.Ready) return UseNative("Companion mods are still initializing");
+                if (PocketCompatibility.Busy) return UseNative("Pocket inventory is busy; its native save hooks will handle saving");
+                if (!Optional(SaveParticipants.Drain, "Companion pending data")) return UseNative("Companion integration unavailable");
                 if (_source == null && Plugin.Current != null && Plugin.Current.SessionSlot != null) LoadSource(Plugin.Current.SessionSlot);
+                RefreshSourceRecords();
                 _automatic = automatic; _kind = automatic ? SaveNaming.NameForAutosave(file) ?? "Autosave" : SaveNaming.PendingName ?? "Manual";
                 _oldHistory = new Dictionary<string, ES3Data>(_history); _oldKinds = new Dictionary<string, RecordKind>(_kinds);
                 _oldCache = SaveRecords.Snapshot(file);
@@ -113,15 +148,16 @@ namespace Apocasaver
                 disk.Track(settings.FullPath);
                 disk.LabelExisted = ES3.KeyExists(LabelKey(file), new ES3Settings("SaveSettings.es3") { location = ES3.Location.File });
                 disk.Label = disk.LabelExisted ? ES3.Load<string>(LabelKey(file), new ES3Settings("SaveSettings.es3") { location = ES3.Location.File }) : "";
-                string patrolStage = SaveParticipants.PatrolLoaded ? disk.Track(SaveParticipants.PatrolPathFor(file)) : null;
+                string patrolStage = SaveParticipants.PatrolLoaded ? disk.Track(SaveParticipants.PatrolPathFor(file), true) : null;
                 disk.Prepare(); // no destination mutation before this durable journal
                 _disk = disk; Target = file; PatrolStage = patrolStage; LastFile = file; LastSuccess = false; LastError = null;
-                _previousPath = ES3Settings.defaultSettings.path; _scale = Time.timeScale; Time.timeScale = 0;
+                _previousPath = ES3Settings.defaultSettings.path; _scale = Time.timeScale;
                 _deadline = Time.realtimeSinceStartup + 60; _player = _global = _cars = _items = _storms = _registry = false;
                 _writeError = null;
                 _stageRecords.Clear();
                 _expected.Clear(); _written.Clear(); _paths.Clear();
-                var roots = CleanWorld.Objects(); SaveHooks.RefreshRoots(roots); _exclusion = CleanWorld.Plan(); _exclusion.Apply();
+                var roots = CleanWorld.Objects(); SaveHooks.RefreshRoots(roots); _exclusion = new CleanWorld.Exclusion();
+                Optional(() => { _exclusion = CleanWorld.Plan(); _exclusion.Apply(); }, "CleanSaves planning");
                 _retainedRoots = CleanWorld.Objects();
                 foreach (var root in roots.Where(g => !_exclusion.Objects.Contains(g))) foreach (var f in root.GetComponentsInChildren<PlayMakerFSM>(true))
                     if (f.enabled && f.Fsm.Initialized && f.Fsm.GlobalTransitions.Any(t => t.FsmEvent.Name == "SaveGame") &&
@@ -132,7 +168,10 @@ namespace Apocasaver
                 foreach (var item in _history)
                 {
                     RecordKind kind; if (!_kinds.TryGetValue(item.Key, out kind)) kind = SaveRecords.LegacyKind(item.Key, item.Value);
-                    if (kind == RecordKind.Session || kind == RecordKind.Dynamic || item.Key == SaveRecords.IndexKey || item.Key == SaveRecords.WorldKey || item.Key == CleanWorld.Key) continue;
+                    if (item.Key == SaveRecords.IndexKey || item.Key == SaveRecords.WorldKey || item.Key == CleanWorld.Key || item.Key == "apocasaver.commit") continue;
+                    // Keep prior session/live-object values until the game replaces them.
+                    // Only discard object records whose owner is known to be absent.
+                    if (kind == RecordKind.Dynamic && !liveNames.Contains(item.Key)) continue;
                     if (item.Key.StartsWith("apocasaver.pose."))
                     {
                         string name = item.Key.Substring("apocasaver.pose.".Length); ES3Data owner;
@@ -148,7 +187,42 @@ namespace Apocasaver
                 Plugin.Log.LogInfo("Save rebuild started for " + file + "; backup=" + disk.DirectoryPath + "; preserved=" + seed.Count);
                 return true;
             }
-            catch (Exception e) { if (Active) Fail(e.Message, true); else Warn(e.Message); return false; }
+            catch (Exception e)
+            {
+                // Before reset, feature setup failures must not swallow the native save click.
+                if (!Active) return UseNative("Rebuild setup failed: " + e);
+                if (SaveFailurePolicy.IsDiskFailure(e)) { Fail(e.ToString(), true, true); return false; }
+                RestoreForNative(e); return true;
+            }
+        }
+        private static bool UseNative(string reason)
+        {
+            NativeFallback = true; LastError = null;
+            // Preserve source-playthrough data even when optional adapters cannot rebuild.
+            // This changes only the native cache; the game still performs its normal disk write.
+            if (SaveRecords.Ready && _source != null && AutosaveSession.IsSlotFile(LastFile))
+            {
+                try { RefreshSourceRecords(); SaveRecords.ReplaceCache(LastFile, _history); }
+                catch (Exception e) { Diagnostic("Source data transfer unavailable; retaining native cache: " + e); }
+            }
+            Diagnostic(reason + "; using the game's normal save without cleanup"); return true;
+        }
+        private static void RefreshSourceRecords()
+        {
+            if (_source == null) return;
+            foreach (var item in SaveRecords.Snapshot(_source))
+            {
+                RecordKind kind;
+                // Captured unloaded-location state can be newer than the last on-disk save.
+                if (_kinds.TryGetValue(item.Key, out kind) && kind == RecordKind.History && _history.ContainsKey(item.Key)) continue;
+                _history[item.Key] = item.Value;
+            }
+        }
+        private static void RestoreForNative(Exception error)
+        {
+            // Restore any reversible work, then let the original click/event continue.
+            Fail("Rebuild feature unavailable: " + error, true);
+            if (!RecoveryRequired) UseNative("Rebuild feature unavailable");
         }
         internal static string Redirect(ES3Settings settings)
         {
@@ -160,18 +234,21 @@ namespace Apocasaver
         { return Active && _exclusion != null && go != null && _exclusion.Objects.Contains(go); }
         internal static void FileWritten(ES3Settings settings)
         {
-            if (!Active || Publishing || settings.location != ES3.Location.File || settings.path != Target) return;
+            string file = Active ? Target : _source;
+            if (file == null || Publishing || settings.location != ES3.Location.File || settings.path != file) return;
             try
             {
                 var disk = new ES3File(settings, true); var written = SaveRecords.Data(disk);
-                var cache = SaveRecords.Data(ES3File.cachedFiles[Target]);
+                ES3File cached; if (!ES3File.cachedFiles.TryGetValue(file, out cached)) return;
+                var cache = SaveRecords.Data(cached);
                 foreach (var item in written)
                 {
                     ES3Data previous;
-                    if (!_stageRecords.TryGetValue(item.Key, out previous) || !previous.bytes.SequenceEqual(item.Value.bytes)) cache[item.Key] = item.Value;
+                    if (!_stageRecords.TryGetValue(item.Key, out previous) || !previous.bytes.SequenceEqual(item.Value.bytes))
+                    { cache[item.Key] = item.Value; if (!Active) _history[item.Key] = item.Value; }
                 }
-                foreach (string removed in _stageRecords.Keys.Where(k => !written.ContainsKey(k)).ToArray()) cache.Remove(removed);
-                _stageRecords = new Dictionary<string, ES3Data>(written); SaveRecords.MarkDirty(Target);
+                foreach (string removed in _stageRecords.Keys.Where(k => !written.ContainsKey(k)).ToArray()) { cache.Remove(removed); if (!Active) _history.Remove(removed); }
+                _stageRecords = new Dictionary<string, ES3Data>(written); SaveRecords.MarkDirty(file);
             }
             catch (Exception e) { ReportError(e); }
         }
@@ -192,7 +269,7 @@ namespace Apocasaver
             if (key == "newGOArray_Sandstorms") _storms = true;
         }
         internal static void Stored(ES3PlayMaker.SettingsAction action)
-        { if (Active && action.Fsm.Name == "Save_NewGO_ArrayList") _registry = true; }
+        { if (action.Fsm.Name == "Save_NewGO_ArrayList") { if (Active) _registry = true; if (NativeFallback) _fallbackStored = true; } }
         internal static void OnState(Fsm fsm, string state)
         {
             if (fsm == null || fsm.Name != "SaveLoadGame") return;
@@ -201,91 +278,217 @@ namespace Apocasaver
             else if (state == "Start" || state == "setSeed")
             { if (Active) Fail("New game interrupted saving", false); _source = null; _loadFile = null; _history.Clear(); _kinds.Clear(); _world = Guid.NewGuid().ToString("N"); CleanWorld.Load(null); }
             else if (state == "isPlay" && _loadFile != null)
-            { try { LoadSource(_loadFile); _loadFile = null; } catch (Exception e) { RecoveryRequired = true; Warn("Could not read loaded save history: " + e.Message); } }
+            {
+                try { LoadSource(_loadFile); }
+                catch (Exception e) { _rebuildAvailable = false; Diagnostic("Could not read loaded save history; native saving remains available: " + e); }
+                finally { _loadFile = null; }
+            }
         }
         private static void LoadSource(string file)
         {
             if (!AutosaveSession.IsSlotFile(file)) return;
-            _history = SaveRecords.Snapshot(file); _kinds = SaveRecords.Decode(RawString(_history, SaveRecords.IndexKey));
-            _world = RawString(_history, SaveRecords.WorldKey) ?? Guid.NewGuid().ToString("N");
-            CleanWorld.Load(RawString(_history, CleanWorld.Key)); _source = file;
+            _history = SaveRecords.Snapshot(file); _kinds = new Dictionary<string, RecordKind>();
+            try { _kinds = SaveRecords.Decode(RawString(_history, SaveRecords.IndexKey)); }
+            catch (Exception e) { Diagnostic("Record index unavailable; retaining records using legacy classification: " + e.Message); }
+            try { _world = RawString(_history, SaveRecords.WorldKey) ?? Guid.NewGuid().ToString("N"); }
+            catch (Exception e) { Diagnostic("World identifier unavailable: " + e.Message); _world = Guid.NewGuid().ToString("N"); }
+            try { CleanWorld.Load(RawString(_history, CleanWorld.Key)); }
+            catch (Exception e) { CleanWorld.Load(null); Diagnostic("Cleanup metadata unavailable; unknown objects will be retained: " + e.Message); }
+            _source = file;
         }
         internal static void CaptureHistory(string key, ES3Data value)
-        { _history[key] = value; _kinds[key] = RecordKind.History; if (Active && _oldHistory != null) { _oldHistory[key] = value; _oldKinds[key] = RecordKind.History; } }
+        {
+            _history[key] = value; _kinds[key] = RecordKind.History;
+            if (Active && _oldHistory != null)
+            {
+                _oldHistory[key] = value; _oldKinds[key] = RecordKind.History;
+                ES3File cache; if (ES3File.cachedFiles.TryGetValue(Target, out cache)) SaveRecords.Data(cache)[key] = value;
+            }
+        }
         internal static IDictionary<string, ES3Data> History { get { return _history; } }
         internal static bool HasSession { get { return _initialized && (_source != null || _loadFile == null); } }
+        internal static void FlushAvailable() { if (Active) { _deadline = -1f; Tick(); } }
         internal static void Tick()
         {
-            Initialize(); if (!Ready || !Active) return;
+            Initialize();
+            if (!Active)
+            {
+                if (NativeFallbackFinished && !WriteFailed)
+                {
+                    try { CompleteNativeFallback(); }
+                    catch (Exception e) { _fallbackStored = false; Warn("Saving failed to disk: " + e); }
+                }
+                return;
+            }
             try
             {
-                if (Time.realtimeSinceStartup >= _deadline) throw new TimeoutException("The game's save did not finish within 60 seconds");
                 if (_writeError != null) throw new IOException(_writeError);
-                if (Plugin.Current == null || !Plugin.Current.NativeSaveFinished || !_player || !_global || !_cars || !_items || !_storms || !_registry) return;
-                if (_expected.Any(f => f != null && !_written.Contains(f))) throw new IOException("A retained object's native state was not saved: " + _expected.First(f => f != null && !_written.Contains(f)).gameObject.name);
+                bool timeout = Time.realtimeSinceStartup >= _deadline;
+                if (!timeout && (!_registry || Plugin.Current == null || !Plugin.Current.NativeSaveReturned)) return;
+                if (timeout) Diagnostic("Native save completion not confirmed after 60 seconds; writing available data and retaining prior records");
+                if (!_player || !_global || !_cars || !_items || !_storms || !_registry)
+                    Diagnostic("Unconfirmed native writes: player=" + _player + ", global=" + _global + ", cars=" + _cars + ", items=" + _items + ", storms=" + _storms + ", registry=" + _registry);
+                foreach (var f in _expected.Where(f => f != null && !_written.Contains(f))) Diagnostic("Unconfirmed object write; retaining prior data: " + f.gameObject.name + "/" + f.FsmName);
                 Commit();
             }
-            catch (Exception e) { Fail(e.Message, true); }
+            catch (Exception e)
+            {
+                if (SaveFailurePolicy.IsDiskFailure(e)) { Fail(e.ToString(), true, true); return; }
+                Diagnostic("Rebuild feature unavailable during commit; writing available data: " + e);
+                try
+                {
+                    CancelCleanup(); SaveRecords.MarkDirty(Target);
+                    ES3.StoreCachedFile(new ES3Settings(Target) { location = ES3.Location.File });
+                    if (_writeError != null) throw new IOException(_writeError);
+                    Publishing = true; _disk.Publish(); _disk.Complete();
+                    CompleteSuccess(new Dictionary<string, RecordKind>(_kinds));
+                }
+                catch (Exception writeError) { Fail(writeError.ToString(), true, true); }
+            }
+        }
+        internal static void CompleteNativeFallback()
+        {
+            if (WriteFailed) throw new IOException(_writeError);
+            ES3.StoreCachedFile(new ES3Settings(LastFile) { location = ES3.Location.File });
+            if (!File.Exists(new ES3Settings(LastFile) { location = ES3.Location.File }.FullPath)) throw new IOException("Native save did not produce a disk file");
+            // A successfully written newer native save supersedes any unresolved undo journal
+            // for that slot. Keep its backups, but never replay it over the newer save on restart.
+            string root = Path.Combine(BackupRoot, LastFile);
+            if (Directory.Exists(root)) foreach (string journal in Directory.GetFiles(root, "undo.bin", SearchOption.AllDirectories))
+            {
+                string dir = Path.GetDirectoryName(journal);
+                if (File.Exists(Path.Combine(dir, "committed")) || File.Exists(Path.Combine(dir, "recovered")) || File.Exists(Path.Combine(dir, "superseded"))) continue;
+                using (var stream = new FileStream(Path.Combine(dir, "superseded"), FileMode.Create, FileAccess.Write, FileShare.None)) { stream.WriteByte(1); stream.Flush(true); }
+            }
+            LastSuccess = true; LastError = null; NativeFallback = false;
+            _source = LastFile;
+            try { RefreshSourceRecords(); } catch (Exception e) { Diagnostic("Native save history refresh: " + e); }
+            if (Plugin.Current != null) { try { Plugin.Current.SaveCommitted(LastFile); } catch (Exception e) { Diagnostic("Native save bookkeeping: " + e); } }
         }
         private static void Commit()
         {
             var cache = new ES3Settings(Target) { location = ES3.Location.Cache };
-            if (!_retainedRoots.SetEquals(CleanWorld.Objects())) throw new IOException("Registered world objects changed during saving; try again after the operation finishes");
-            _exclusion.Validate();
+            Optional(() =>
+            {
+                var roots = CleanWorld.Objects();
+                if (!_retainedRoots.SetEquals(roots))
+                {
+                    Diagnostic("Registered world objects changed during saving; refreshing native object data and registry arrays");
+                    SaveHooks.RefreshRoots(roots);
+                    foreach (var root in roots.Except(_retainedRoots)) foreach (var f in root.GetComponentsInChildren<PlayMakerFSM>(true))
+                        if (f.enabled && f.Fsm.Initialized && f.Fsm.GlobalTransitions.Any(t => t.FsmEvent.Name == "SaveGame")) Optional(() => f.SendEvent("SaveGame"), "Newly registered object");
+                    RewriteRegistries();
+                }
+                _exclusion.Validate();
+            }, "Cleanup validation");
+            if (_conservative) CancelCleanup();
             // Native flush has produced a readable staged file for participant disk verification.
-            SaveParticipants.CompleteNative(Target, Plugin.Current.WorldSeed);
-            if (HandPose.PendingCount > 0) HandPose.Flush(Target);
-            if (HandPose.PendingCount > 0) throw new IOException("Hand-pose metadata could not be saved");
+            if (!Optional(() => { if (!SaveParticipants.CompleteNative(Target, Plugin.Current == null ? 0 : Plugin.Current.WorldSeed)) throw new InvalidOperationException("Companion snapshot not confirmed"); }, "Companion snapshot"))
+            {
+                CancelCleanup();
+                // Each unavailable participant retains its own prior data. A healthy
+                // participant still gets a fresh snapshot, including restored cleanup objects.
+                Optional(() => SaveParticipants.CompleteNative(Target, Plugin.Current == null ? 0 : Plugin.Current.WorldSeed), "Retained companion snapshot");
+            }
+            Optional(() => { if (HandPose.PendingCount > 0) HandPose.Flush(Target); if (HandPose.PendingCount > 0) throw new InvalidOperationException("Hand-pose metadata remains pending"); }, "Hand-pose metadata");
             if (_writeError != null) throw new IOException(_writeError);
             foreach (string key in new[] { "Player", "global", "newGOArray_Cars", "newGOArray_Items", "newGOArray_Sandstorms" })
-                if (!ES3.KeyExists(key, cache) || ES3File.cachedFiles[Target].GetKeyType(key) != typeof(ES3PlayMaker.PMDataWrapper)) throw new IOException("Missing or invalid required record: " + key);
+                if (!ES3.KeyExists(key, cache) || ES3File.cachedFiles[Target].GetKeyType(key) != typeof(ES3PlayMaker.PMDataWrapper)) Diagnostic("Unconfirmed record layout: " + key);
+            if (_conservative && _exclusion.Objects.Count > 0)
+            {
+                CancelCleanup();
+                Optional(() => SaveParticipants.CompleteNative(Target, Plugin.Current == null ? 0 : Plugin.Current.WorldSeed), "Retained companion snapshot");
+            }
             var names = CleanWorld.AllNames();
-            ES3.Save(CleanWorld.Key, CleanWorld.Encode(names), cache);
-            ES3.Save(SaveRecords.WorldKey, _world, cache);
+            Optional(() => ES3.Save(CleanWorld.Key, CleanWorld.Encode(names), cache), "Cleanup metadata");
+            Optional(() => ES3.Save(SaveRecords.WorldKey, _world, cache), "World metadata");
             var data = SaveRecords.Snapshot(Target);
             var index = new Dictionary<string, RecordKind>();
             foreach (var item in data) { RecordKind kind; index[item.Key] = _kinds.TryGetValue(item.Key, out kind) ? kind : SaveRecords.LegacyKind(item.Key, item.Value); }
-            ES3.Save(SaveRecords.IndexKey, SaveRecords.Encode(index), cache);
+            Optional(() => ES3.Save(SaveRecords.IndexKey, SaveRecords.Encode(index), cache), "Record index");
+            if (_conservative && _exclusion.Objects.Count > 0)
+            {
+                CancelCleanup();
+                Optional(() => SaveParticipants.CompleteNative(Target, Plugin.Current == null ? 0 : Plugin.Current.WorldSeed), "Retained companion snapshot");
+            }
+            if (_conservative)
+            {
+                var current = SaveRecords.Data(ES3File.cachedFiles[Target]);
+                foreach (var item in _history)
+                    if (!current.ContainsKey(item.Key) && item.Key.StartsWith("apocasaver.object.")) current[item.Key] = item.Value;
+            }
             string marker = Guid.NewGuid().ToString("N"); ES3.Save("apocasaver.commit", marker, cache);
             SaveRecords.MarkDirty(Target); ES3.StoreCachedFile(new ES3Settings(Target) { location = ES3.Location.File });
-            var disk = new ES3Settings(Target) { location = ES3.Location.File };
-            if (!File.Exists(disk.FullPath) || ES3.Load<string>("apocasaver.commit", disk) != marker) throw new IOException("Save commit could not be verified");
-            var readback = new ES3File(disk, true); var diskRecords = SaveRecords.Data(readback);
-            foreach (var item in SaveRecords.Snapshot(Target))
-            { ES3Data value; if (!diskRecords.TryGetValue(item.Key, out value) || !value.bytes.SequenceEqual(item.Value.bytes)) throw new IOException("Readback mismatch: " + item.Key); }
+            // Publication verifies byte hashes. Semantic checks cannot veto a successful write.
             Publishing = true;
             _disk.Publish();
-            Plugin.Current.StampCommitted(Target, _kind);
+            if (Plugin.Current != null) Optional(() => Plugin.Current.StampCommitted(Target, _kind), "Slot label");
             _disk.Complete();
-            _history = SaveRecords.Snapshot(Target); _kinds = index; _source = Target;
+            CompleteSuccess(index);
+        }
+        private static void CompleteSuccess(Dictionary<string, RecordKind> index)
+        {
+            try { _history = SaveRecords.Snapshot(Target); _kinds = index; _source = Target; }
+            catch (Exception e) { _rebuildAvailable = false; Diagnostic("Post-save history unavailable; future saves use native saving: " + e); }
             LastSuccess = true; LastError = null; string file = Target; var exclusion = _exclusion;
             Time.timeScale = _scale; _disk = null; Publishing = false; Target = PatrolStage = null; _paths.Clear();
-            exclusion.Destroy(); Plugin.Current.SaveCommitted(file);
-            Plugin.Log.LogInfo("Save rebuilt and independently verified: " + file);
-            if (!_automatic) StatusLabel.Show("Game saved", 4, false);
+            if (exclusion != null) { try { exclusion.Destroy(); } catch (Exception e) { Diagnostic("Cleanup destruction: " + e); } }
+            if (Plugin.Current != null) { try { Plugin.Current.SaveCommitted(file); } catch (Exception e) { Diagnostic("Post-save bookkeeping: " + e); } }
+            Plugin.Log.LogInfo("Save written to disk: " + file + (_warnings.Count == 0 ? "" : "; diagnostics=" + _warnings.Count));
+            if (!_automatic) StatusLabel.Show(_warnings.Count == 0 ? "Game saved" : "Save written with warnings; see log", 6, false);
             PruneBackups(file);
         }
-        internal static void Fail(string error, bool resume)
+        private static void CancelCleanup()
+        {
+            if (_exclusion == null || _exclusion.Objects.Count == 0) return;
+            var restored = _exclusion.Objects.ToArray(); _exclusion.Restore(); _exclusion = new CleanWorld.Exclusion();
+            SaveHooks.RefreshRoots(CleanWorld.Objects());
+            // Put prior live-object data back before native callbacks refresh restored objects.
+            var data = SaveRecords.Data(ES3File.cachedFiles[Target]);
+            foreach (var item in _history) if (!data.ContainsKey(item.Key)) data[item.Key] = item.Value;
+            foreach (var go in restored.Where(g => g != null)) foreach (var f in go.GetComponents<PlayMakerFSM>())
+                if (f.enabled && f.Fsm.Initialized && f.Fsm.GlobalTransitions.Any(t => t.FsmEvent.Name == "SaveGame")) Optional(() => f.SendEvent("SaveGame"), "Retained cleanup object");
+            RewriteRegistries();
+            Diagnostic("CleanSaves skipped for this save; all candidates retained");
+        }
+        private static void RewriteRegistries()
+        {
+            var go = GameObject.Find("NewGO_ArrayList");
+            var fsm = go == null ? null : go.GetComponents<PlayMakerFSM>().FirstOrDefault(f => f.FsmName == "Save_NewGO_ArrayList");
+            if (fsm == null) return;
+            foreach (var list in CleanWorld.Registries())
+            {
+                string key = list.referenceName == "ArrayList_Cars" ? "newGOArray_Cars" : list.referenceName == "ArrayList_Items" ? "newGOArray_Items" : "newGOArray_Sandstorms";
+                var action = new ES3PlayMaker.Save { key = key, errorMessage = "", value = new FsmVar(new FsmArray { Name = key, ElementType = VariableType.GameObject, Values = list.arrayList.Cast<object>().ToArray() }) };
+                action.Init(fsm.Fsm.States[0]); action.Enter();
+            }
+        }
+        internal static void Fail(string error, bool resume, bool diskFailure = false)
         {
             if (!Active) return;
-            var tx = _disk; LastSuccess = false; LastError = error;
+            var tx = _disk; LastSuccess = false; LastDiskFailure = diskFailure; LastError = error;
             LastFailureCause = error;
             try
             {
                 if (Plugin.Current != null) Plugin.Current.AbortNativeSave();
-                SaveParticipants.Cancel(); Publishing = true;
+                try { SaveParticipants.Cancel(); } catch (Exception e) { Diagnostic("Companion cancellation: " + e); }
+                Publishing = true;
                 HeldItemKeeper.CancelMetadataSave();
-                tx.Rollback(RestoreLabel);
+                tx.Rollback((file, existed, label) => Optional(() => RestoreLabel(file, existed, label), "Restoring slot label"));
                 if (tx.Files[0].Existed) SaveRecords.ReplaceCache(Target, _oldCache, false); else ES3File.cachedFiles.Remove(Target);
                 _history = _oldHistory; _kinds = _oldKinds;
                 if (_exclusion != null) _exclusion.Restore();
                 ES3Settings.defaultSettings.path = _previousPath;
                 foreach (var path in _paths) path.Item1.Value = path.Item2;
-                Plugin.Log.LogError("Saving failed; previous destination restored: " + error);
-                Warn(tx.Files[0].Existed ? "Saving failed. The previous save was restored." : "Saving failed. No save was created.");
+                if (diskFailure)
+                {
+                    Plugin.Log.LogError("Save disk write failed; previous destination restored: " + error);
+                    Warn(tx.Files[0].Existed ? "Saving failed to disk. The previous save was restored." : "Saving failed to disk. No save was created.");
+                }
+                else Diagnostic("Save rebuild canceled; previous destination restored: " + error);
             }
             catch (Exception e)
-            { RecoveryRequired = true; Plugin.Log.LogError("Recovery required. Backup: " + tx.DirectoryPath + "\n" + e); Warn("Saving failed. Recovery needed; backup: " + tx.DirectoryPath); }
+            { RecoveryRequired = true; _rebuildAvailable = false; LastDiskFailure = SaveFailurePolicy.IsDiskFailure(e); Plugin.Log.LogError("Recovery required. Backup: " + tx.DirectoryPath + "\n" + e); Warn("Saving failed. Recovery needed; backup: " + tx.DirectoryPath); }
             finally { if (resume) Time.timeScale = _scale; _disk = null; Publishing = false; Target = PatrolStage = null; _paths.Clear(); }
         }
         internal static bool DeferredLabel(ES3PlayMaker.SettingsAction action)

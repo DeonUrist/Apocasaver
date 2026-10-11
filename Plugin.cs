@@ -19,7 +19,7 @@ namespace Apocasaver
     {
         public const string GUID = "com.denis.apocalypter.apocasaver";
         public const string NAME = "Apocasaver";
-        public const string VERSION = "2.0.1";
+        public const string VERSION = "2.0.2";
 
         internal static ManualLogSource Log;
         internal static ConfigEntry<bool> Enabled;
@@ -121,7 +121,7 @@ namespace Apocasaver
                 catch (Exception e) { Logger.LogError("Patch " + t.Name + " failed, that feature is inactive: " + e); }
             }
             AutosaveHooksReady = stateHook && writeHook && cacheHook && actionHook && loadHook && eventHook && fileHook;
-            if (!AutosaveHooksReady) Logger.LogError("Autosave disabled for this session: native save verification hooks could not be installed");
+            if (!AutosaveHooksReady) Logger.LogWarning("Save rebuilding unavailable: native saving will be used because verification hooks could not be installed");
         }
 
         private void OnSceneLoaded(Scene scene, LoadSceneMode mode)
@@ -146,7 +146,7 @@ namespace Apocasaver
     {
         private void Awake() { Plugin.Current = this; _autosave = new AutosaveSession(this); }
         private void OnGUI() { SaveNaming.OnGUI(); }
-        private void LateUpdate() { SaveNaming.LateUpdate(); _presentation.Tick(); if (SaveCoordinator.Active) Time.timeScale = 0; }
+        private void LateUpdate() { SaveNaming.LateUpdate(); _presentation.Tick(); }
         private void OnDestroy()
         {
             SaveCoordinator.Fail("Scene/runner ended during saving", false);
@@ -182,6 +182,7 @@ namespace Apocasaver
         internal string SessionSlot { get { return _armed ? _armedFile : null; } }
         internal int WorldSeed { get { return Alive(_saveLoad) && _saveLoad.FsmVariables.GetFsmInt("seed") != null ? _saveLoad.FsmVariables.GetFsmInt("seed").Value : 0; } }
         internal bool NativeSaveFinished { get { return Alive(_saveLoad) && Alive(_newGoSave) && Alive(_saveButton) && SafeState(_saveLoad) == "isPlay" && SafeState(_newGoSave) == "off" && SafeState(_saveButton) == "off" && !PocketCompatibility.SaveBusy; } }
+        internal bool NativeSaveReturned { get { return Alive(_saveLoad) && SafeState(_saveLoad) == "isPlay"; } }
         private string _armedFile;        // slot file at the moment we armed
         private bool _slotLabelsFitted;
         private int _heldErrors;
@@ -196,7 +197,8 @@ namespace Apocasaver
             catch (Exception e) { if (_heldErrors++ % 600 == 0) Plugin.Log.LogWarning("HeldItemKeeper (" + _heldErrors + "x): " + e); }   // first one, then every 600th
             if (now >= _nextScan) { _nextScan = now + 1f; Scan(); }
             SaveCoordinator.Tick();
-            CleanWorld.Tick(InPlay());
+            try { CleanWorld.Tick(InPlay()); }
+            catch (Exception e) { SaveCoordinator.Diagnostic("Cleanup tracking unavailable: " + e); }
             if (!Alive(_saveLoad)) { _autosave.Cancel("SaveLoadGame disappeared", false); Disarm("SaveLoadGame gone"); _lastState = ""; return; }
 
             // Watch the game's own save/load flow (state changes only; the held-item keeper follows the same changes).
@@ -250,7 +252,7 @@ namespace Apocasaver
 
         private void WarnCountdown(float remaining)
         {
-            if (!_armed || !Plugin.AutosaveHooksReady) return;
+            if (!_armed) return;
             int w = Plugin.WarningSeconds.Value;
             if (w <= 0) return;
             if (_warnCycle != _lastSave) { _warnCycle = _lastSave; _warnNext = w; }
@@ -332,8 +334,7 @@ namespace Apocasaver
 
         private bool CanSaveNow(float now, bool onFoot)
         {
-            if (SaveCoordinator.Active || SaveCoordinator.RecoveryRequired) return false;
-            if (!Plugin.AutosaveHooksReady) return false;
+            if (SaveCoordinator.Active) return false;
             if (PocketCompatibility.Busy) return false;
             if (!InPlay()) return false;
             if (!onFoot || now - _onFootSince < 2f) return false;                    // in a car (or just got out)
@@ -387,8 +388,13 @@ namespace Apocasaver
             StatusLabel.Hide();
             _presentation.Begin(_menu, canvas, loading);
             Plugin.Log.LogInfo("Autosave: native slot " + file + ", all save paths synchronized");
+            if (!Plugin.AutosaveHooksReady) SaveCoordinator.Begin(file, true);
             slot.SendEvent("Clicked");
-            if (!SaveCoordinator.Active) throw new IOException(SaveCoordinator.LastError ?? "Save rebuild did not start");
+            if (!SaveCoordinator.Active && !SaveCoordinator.NativeFallback)
+            {
+                if (SaveCoordinator.LastDiskFailure) throw new IOException(SaveCoordinator.LastError ?? "Save failed to disk");
+                throw new InvalidOperationException(SaveCoordinator.LastError ?? "Native save did not start");
+            }
             StampSlotLabel(file, kind, true); // Native slot click writes a bare date; stamp and persist our label afterwards.
         }
 
@@ -396,8 +402,12 @@ namespace Apocasaver
         {
             get
             {
-                if (!SaveCoordinator.Active && SaveCoordinator.LastFile == _autosaveFile && !SaveCoordinator.LastSuccess && SaveCoordinator.LastError != null) throw new IOException(SaveCoordinator.LastError);
-                return !SaveCoordinator.Active && SaveCoordinator.LastFile == _autosaveFile && SaveCoordinator.LastSuccess;
+                if (!SaveCoordinator.Active && SaveCoordinator.LastFile == _autosaveFile && !SaveCoordinator.LastSuccess && SaveCoordinator.LastError != null)
+                {
+                    if (SaveCoordinator.LastDiskFailure) throw new IOException(SaveCoordinator.LastError);
+                    throw new InvalidOperationException(SaveCoordinator.LastError);
+                }
+                return SaveCoordinator.NativeFallbackFinished || !SaveCoordinator.Active && SaveCoordinator.LastFile == _autosaveFile && SaveCoordinator.LastSuccess;
             }
         }
 
@@ -416,12 +426,24 @@ namespace Apocasaver
 
         void IAutosaveRuntime.Commit(string file)
         {
-            if (file != SaveCoordinator.LastFile || !SaveCoordinator.LastSuccess) throw new IOException("Save rebuild did not commit");
+            if (SaveCoordinator.Active) SaveCoordinator.FlushAvailable();
+            if (SaveCoordinator.NativeFallback && file == SaveCoordinator.LastFile)
+            {
+                // A missing completion signal is diagnostic. Only the disk flush may fail.
+                if (!SaveCoordinator.NativeFallbackFinished) SaveCoordinator.Diagnostic("Native completion not confirmed; flushing available native cache");
+                SaveCoordinator.CompleteNativeFallback();
+            }
+            if (file != SaveCoordinator.LastFile || !SaveCoordinator.LastSuccess)
+            {
+                if (SaveCoordinator.LastDiskFailure) throw new IOException(SaveCoordinator.LastError ?? "Save could not be written to disk");
+                throw new InvalidOperationException("Native save was interrupted");
+            }
         }
 
         void IAutosaveRuntime.EndSave(bool success, string error, bool resume)
         {
-            if (!success) SaveCoordinator.Fail(error ?? "Autosave canceled", resume);
+            bool diskFailure = _autosave.DiskFailure || SaveCoordinator.LastDiskFailure;
+            if (!success) SaveCoordinator.Fail(error ?? "Autosave canceled", resume, diskFailure);
             try { _presentation.End(resume); }
             catch (Exception e) { Plugin.Log.LogError("Autosave cleanup: " + e); }
             _autosaveFile = null;
@@ -430,8 +452,9 @@ namespace Apocasaver
             else if (error != null)
             {
                 _lastSave = Time.realtimeSinceStartup;
-                Plugin.Log.LogError("Autosave failed: " + error);
-                StatusLabel.Show(SaveCoordinator.LastError ?? "Autosave failed", 12f, true);
+                if (diskFailure) Plugin.Log.LogError("Autosave disk write failed: " + error);
+                else Plugin.Log.LogInfo("Autosave deferred: " + error);
+                StatusLabel.Show(diskFailure ? SaveCoordinator.LastError ?? "Autosave failed to disk" : "Autosave deferred: " + error, 12f, diskFailure);
             }
         }
 
@@ -559,7 +582,7 @@ namespace Apocasaver
             string stamp = kind + " (Seed: " + WorldSeed + ") " + DateTime.Now.ToString("dd/MM/yyyy HH:mm", System.Globalization.CultureInfo.InvariantCulture);
             var disk = new ES3Settings("SaveSettings.es3") { location = ES3.Location.File };
             ES3.Save(key, stamp, disk);
-            if (ES3.Load<string>(key, disk) != stamp) throw new IOException("Slot label could not be verified");
+            if (ES3.Load<string>(key, disk) != stamp) throw new InvalidOperationException("Slot label could not be verified");
             ES3.Save(key, stamp, new ES3Settings("SaveSettings.es3") { location = ES3.Location.Cache });
             StampSlotLabel(file, kind, false); SaveNaming.PendingName = null;
         }
@@ -593,9 +616,7 @@ namespace Apocasaver
         {
             if (fsmEvent == null) return true;
             string n = fsmEvent.Name;
-            if (n == "LoadGame" || n == "Clicked" && __instance.GameObject != null && __instance.GameObject.name.StartsWith("load_game_"))
-            { SaveCoordinator.Initialize(); if (!SaveCoordinator.Ready) return false; }
-            if (SaveCoordinator.RecoveryRequired && (n == "LoadGame" || n == "Clicked" && __instance.GameObject != null && __instance.GameObject.name.StartsWith("load_game_"))) return false;
+            if (n == "LoadGame" || n == "Clicked" && __instance.GameObject != null && __instance.GameObject.name.StartsWith("load_game_")) SaveCoordinator.Initialize();
             if (SaveCoordinator.Active && n == "Clicked" && __instance.GameObject != null && __instance.GameObject.name.StartsWith("load_game_")) return false;
             if (n == "SaveGame")
             {
@@ -607,7 +628,7 @@ namespace Apocasaver
             if (n == "Clicked")
             {
                 try { if (SaveNaming.Intercept(__instance, fsmEvent)) return false; return SaveCoordinator.InterceptClick(__instance); }
-                catch (Exception e) { Plugin.Log.LogError("Save interception failed: " + e); return false; }
+                catch (Exception e) { SaveCoordinator.Diagnostic("Save interception unavailable; using native event: " + e); return true; }
             }
             return true;
         }
@@ -618,7 +639,7 @@ namespace Apocasaver
     {
         static void Postfix(Fsm __instance, FsmState __0)
         {
-            if (__0 != null) SaveCoordinator.OnState(__instance, __0.Name);
+            if (__0 != null) { try { SaveCoordinator.OnState(__instance, __0.Name); } catch (Exception e) { SaveCoordinator.Diagnostic("Save-state tracking unavailable: " + e); } }
             var runner = Plugin.Current;
             if (runner != null && __0 != null) runner.OnNativeStateEntered(__instance, __0.Name);
             if (__instance.Name == "GrabItem")

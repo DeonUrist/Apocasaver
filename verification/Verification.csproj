@@ -11,5 +11,6 @@
     <Compile Include="..\PocketInventoryView.cs" Link="PocketInventoryView.cs" />
     <Compile Include="..\SaveDiskTransaction.cs" Link="SaveDiskTransaction.cs" />
     <Compile Include="..\CleanPolicy.cs" Link="CleanPolicy.cs" />
+    <Compile Include="..\SaveFailurePolicy.cs" Link="SaveFailurePolicy.cs" />
   </ItemGroup>
 </Project>

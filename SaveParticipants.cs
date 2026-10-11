@@ -91,39 +91,58 @@ namespace Apocasaver
             var save = PocketSave;
             if (save != null && (float)Get(save, "_flushAt") >= 0)
             {
-                if (!(bool)Method(save.GetType(), "WriteMapping").Invoke(null, new[] { Get(save, "_file"), Get(save, "_json") })) throw new IOException("Previous pocket mapping has not finished");
+                if (!(bool)Method(save.GetType(), "WriteMapping").Invoke(null, new[] { Get(save, "_file"), Get(save, "_json") })) throw new InvalidOperationException("Previous pocket mapping has not finished");
                 Set(save, "_flushAt", -1f);
             }
         }
-        internal static void CompleteNative(string slot, int seed)
+        internal static bool CompleteNative(string slot, int seed)
+        {
+            bool pocket = SaveCoordinator.Optional(() => CompletePocket(slot), "Pocket snapshot");
+            bool patrol = SaveCoordinator.Optional(() => CompletePatrol(slot, seed), "Patrol snapshot");
+            if (!pocket) RetainEmbedded(slot, "Apocapocket.Slots", false);
+            if (!patrol) RetainEmbedded(slot, "Apocapatrol.Patrol", true);
+            return pocket && patrol;
+        }
+        private static void RetainEmbedded(string slot, string key, bool sidecar)
+        {
+            ES3Internal.ES3Data old;
+            if (!SaveCoordinator.History.TryGetValue(key, out old)) return;
+            SaveRecords.Data(ES3File.cachedFiles[slot])[key] = old;
+            if (sidecar && SaveCoordinator.PatrolStage != null)
+                SaveCoordinator.Optional(() => File.WriteAllBytes(SaveCoordinator.PatrolStage, Convert.FromBase64String(SaveCoordinator.RawString(SaveCoordinator.History, key))), "Prior patrol sidecar");
+        }
+        private static void CompletePocket(string slot)
         {
             var pocket = PocketSave;
             bool enabled = _pocketEnabled != null && ((ConfigEntry<bool>)_pocketEnabled.GetValue(null)).Value;
-            if (enabled && pocket == null) throw new IOException("Pocket inventory save participant is unavailable");
-            if (pocket != null)
+            if (enabled && pocket == null) throw new InvalidOperationException("Pocket inventory save participant is unavailable");
+            if (enabled && pocket != null)
             {
                 if ((bool)Get(pocket, "Normalised") || (bool)Get(pocket, "Loading")) throw new InvalidOperationException("Pocket inventory is still normalizing");
                 var json = Get(pocket, "_json") as string;
-                if (enabled && json == null) throw new IOException("Pocket inventory did not produce a fresh mapping");
+                if (json == null) throw new InvalidOperationException("Pocket inventory did not produce a fresh mapping");
                 if (json != null)
                 {
-                    if (!(bool)Method(pocket.GetType(), "WriteMapping").Invoke(null, new object[] { slot, json })) throw new IOException("Pocket mapping verification failed");
+                    if (!(bool)Method(pocket.GetType(), "WriteMapping").Invoke(null, new object[] { slot, json })) throw new InvalidOperationException("Pocket mapping verification failed");
                     Set(pocket, "_flushAt", -1f);
                     var settings = new ES3Settings(slot) { location = ES3.Location.Cache };
-                    if (!ES3.KeyExists("Apocapocket.Slots", settings) || ES3.Load<string>("Apocapocket.Slots", settings) != json) throw new IOException("Pocket mapping missing from save cache");
+                    if (!ES3.KeyExists("Apocapocket.Slots", settings) || ES3.Load<string>("Apocapocket.Slots", settings) != json) throw new InvalidOperationException("Pocket mapping missing from save cache");
                 }
             }
+        }
+        private static void CompletePatrol(string slot, int seed)
+        {
             if (_patrolStore != null)
             {
                 // Snapshot the final exclusion set now, rather than trusting a prior asynchronous Tick snapshot.
                 Method(_patrolStore, "Save").Invoke(null, new object[] { slot, seed });
                 string pending = Field(_patrolStore, "_pendingData").GetValue(null) as string;
-                if (pending == null || (string)Field(_patrolStore, "_pendingSlot").GetValue(null) != slot) throw new IOException("Patrol snapshot failed");
+                if (pending == null || (string)Field(_patrolStore, "_pendingSlot").GetValue(null) != slot) throw new InvalidOperationException("Patrol snapshot failed");
                 Method(_patrolStore, "FlushPending").Invoke(null, null);
                 var settings = new ES3Settings(slot) { location = ES3.Location.Cache };
                 if (!ES3.KeyExists("Apocapatrol.Patrol", settings) || ES3.Load<string>("Apocapatrol.Patrol", settings) != pending ||
-                    Convert.ToBase64String(File.ReadAllBytes(SaveCoordinator.PatrolStage)) != pending) throw new IOException("Patrol embedded data and sidecar disagree");
-                if (Method(_patrolStore, "Deserialize").Invoke(null, new object[] { Convert.FromBase64String(pending) }) == null) throw new IOException("Invalid patrol snapshot");
+                    Convert.ToBase64String(File.ReadAllBytes(SaveCoordinator.PatrolStage)) != pending) throw new InvalidOperationException("Patrol embedded data and sidecar disagree");
+                if (Method(_patrolStore, "Deserialize").Invoke(null, new object[] { Convert.FromBase64String(pending) }) == null) throw new InvalidOperationException("Invalid patrol snapshot");
             }
         }
         internal static void Cancel()

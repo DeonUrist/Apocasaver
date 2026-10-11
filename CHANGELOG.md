@@ -1,3 +1,17 @@
+# 2.0.2
+
+- Stop rejecting saves for missing native/object confirmations, FSM states, optional companion bindings, record layout
+  checks or cleanup uncertainty. Log diagnostics and keep prior useful source-playthrough records instead.
+- Flush available data on completion timeout; only actual disk persistence errors fail publication and restore backups.
+- Use the game's normal saving when rebuilding cannot initialize, without deleting the destination or blocking loads.
+- Cancel uncertain cleanup, restore its objects and rewrite the saved registration arrays. Independent companion adapters
+  still save fresh data when another participant is unavailable; that participant retains its prior embedded data.
+- Keep terrain history captured during saving in the current save, not only the next save.
+- Stop forcing the time scale to zero throughout manual saving; allow the game's own save flow to advance.
+- Mark older unresolved journals as superseded after a newer native fallback save succeeds, retaining their backup files.
+- Add native regressions for missing confirmations, retained object data, cleanup protection changes, native fallback,
+  history captured during saving and real ES3 disk-lock failures.
+
 # 2.0.1
 
 - Fix the false startup error "Save participant is still loading" when the game destroys Apocapatrol/Apocapocket's native

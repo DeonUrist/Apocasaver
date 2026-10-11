@@ -2,13 +2,14 @@
 
 **Safe save rebuilding, autosave, save naming and optional world cleanup** for Apocalypter (BepInEx 5 plugin).
 
-Version **2.0.1** rebuilds every supported manual save and autosave from a fresh cache. Occupied slots are backed up before
-replacement; failed saves restore the previous file, cache and slot label. Useful location history follows the current
+Version **2.0.2** rebuilds supported manual saves and autosaves from a fresh cache. Occupied slots are backed up before
+replacement; disk write failures restore the previous file, cache and slot label. Useful location history follows the current
 playthrough into both old and new slots. Vehicle hinges use stable reference keys, preventing old rotation records from
 accumulating as a vehicle moves. Unknown legacy/mod records are retained conservatively.
 
-2.0.1 fixes 2.0.0's false startup "Save participant is still loading" / recovery warning after the game destroys a companion
-plugin component. Its persistent runner remains supported; real loading delays are retried without a permanent failure latch.
+2.0.2 makes save completion checks diagnostic: missing confirmations, optional bindings and cleanup uncertainty do not
+reject saving. Prior useful records are kept, uncertain cleanup is skipped, and unavailable rebuild integration falls back
+to the game's normal save. Only disk persistence failures reject an attempted write. Includes 2.0.1's destroyed-component fix.
 
 Saves the game at a configurable interval into the slot the current character was last saved to or loaded from, and stamps the save
 slots so you can tell autosaves and manual saves apart.
@@ -31,7 +32,7 @@ slots so you can tell autosaves and manual saves apart.
   the original object registration lists without destroying the candidates.
 - Optional adapters for **Apocapatrol 2.7.0** and **Apocapocket 2.0.7** coordinate their delayed writes. Patrol sidecars and
   embedded snapshots agree before commit; failed saves cancel delayed writes and restore the sidecar. No replacement of
-  either companion mod is needed. Unsupported companion bindings block replacement with a warning.
+  either companion mod is needed. Unsupported companion bindings use native saving without cleanup, with a log warning.
 - A red **5 → 4 → 3 → 2 → 1** countdown precedes every autosave. If you enter a menu/vehicle or stop being eligible, the
   countdown restarts when you can save again.
 - Drops the held item with vanilla GrabItem and gives it 0.75 seconds of live physics before pausing.
@@ -89,13 +90,14 @@ entering `SaveGame` or the load states arms the autosave on that slot; a new gam
 After the countdown and vanilla item drop, an autosave synchronizes `SaveLoadGame.SaveFile` and
 `NewGO_ArrayList/Save_NewGO_ArrayList.SaveFile`, enters the pause menu, and sends `Clicked` to `save_game_N/Continue`.
 The slot's existing custom name is preserved. The loading-screen copy contains visual components only, so it cannot execute
-load actions. Save callbacks verify new `Player` and `global` writes, the registry cache flush, and both FSMs' completion.
-The selected cache is then explicitly stored to a staged file. Every record is read back and compared, along with the unique
-commit marker, before the slot and companion files are published and gameplay resumes. File-only ES3 mod writes are mirrored
+load actions. Save callbacks observe native writes and the registry cache flush. Missing write confirmations or unexpected
+FSM states produce diagnostics and retain prior records; a completion timeout flushes available data instead of rejecting it.
+The selected cache is explicitly stored to a staged file, then published with byte-hash verification. Uncertain cleanup is
+canceled and its objects restored to the saved registry arrays. File-only ES3 mod writes are mirrored
 into the fresh cache so the final flush cannot erase them. The transaction also applies to manual saves when autosave is off.
-Timeouts/errors restore the pause/UI state and report failure. Scene changes clear cached game references and cancel the
-transaction without overriding the new scene's time scale. If verification hooks cannot be installed, autosave stays inactive
-and logs the reason.
+Disk write failures restore the previous save and report failure. Scene changes clear cached game references and cancel the
+transaction without overriding the new scene's time scale. If rebuild hooks cannot be installed, saving uses the native
+flow and logs the reason.
 
 ### Held item
 
@@ -110,7 +112,7 @@ before the shared final commit. Metadata callbacks for a failed save are cancele
 
 ## Verification
 
-- `dotnet run --project verification/Verification.csproj -c Release`: 91 transaction/compatibility/filesystem checks, including repeated
+- `dotnet run --project verification/Verification.csproj -c Release`: 100 transaction/compatibility/filesystem checks, including repeated
   load/autosave cycles, countdown interruption, slot switches, item settling/re-grabbing, native errors, commit errors,
   timeouts, stale hand references, slot ownership by identity and pocket operation/save transitions.
 - `powershell.exe -NoProfile -File verification/CheckBindings.ps1`: verifies native hook targets/signatures and the public
