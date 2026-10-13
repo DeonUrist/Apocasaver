@@ -2,10 +2,15 @@
 
 **Safe save rebuilding, autosave, save naming and optional world cleanup** for Apocalypter (BepInEx 5 plugin).
 
-Version **2.0.3** rebuilds supported manual saves and autosaves from a fresh cache. Occupied slots are backed up before
+Version **2.0.4** rebuilds supported manual saves and autosaves from a fresh cache. Occupied slots are backed up before
 replacement; disk write failures restore the previous file, cache and slot label. Useful location history follows the current
 playthrough into both old and new slots. Vehicle hinges use stable reference keys, preventing old rotation records from
 accumulating as a vehicle moves. Unknown legacy/mod records are retained conservatively.
+
+2.0.4 integrates [Wad67's terrain-template fix](https://github.com/DeonUrist/Apocasaver/pull/1) and removes repeated
+history copies and full-pool processing during terrain placement. Cleanup scans references once after checking candidate
+eligibility, and its periodic registry/distance scans stop when CleanSaves is off. Hand poses use one batched disk write
+outside a save or the shared transaction's final flush. See [performance verification](docs/2.0.4-verification.md).
 
 2.0.3 avoids reading actions on uninitialized menu FSMs during cleanup and checks native write confirmations only for
 active parts that can receive SaveGame. Uninitialized external references still protect cleanup candidates. Inactive visual

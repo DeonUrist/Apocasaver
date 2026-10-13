@@ -19,7 +19,7 @@ namespace Apocasaver
     {
         public const string GUID = "com.denis.apocalypter.apocasaver";
         public const string NAME = "Apocasaver";
-        public const string VERSION = "2.0.3";
+        public const string VERSION = "2.0.4";
 
         internal static ManualLogSource Log;
         internal static ConfigEntry<bool> Enabled;
@@ -126,6 +126,7 @@ namespace Apocasaver
 
         private void OnSceneLoaded(Scene scene, LoadSceneMode mode)
         {
+            WorldHistory.Reset();
             if (_runnerGo != null) { var r = _runnerGo.GetComponent<Runner>(); if (r != null) r.ResetForScene(scene.name); }
             EnsureRunner("sceneLoaded " + scene.name);
         }

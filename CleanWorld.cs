@@ -13,7 +13,7 @@ namespace Apocasaver
         private static readonly HashSet<string> Handled = new HashSet<string>(), Known = new HashSet<string>(), PatrolItems = new HashSet<string>();
         private static readonly Dictionary<string, float> Far = new Dictionary<string, float>();
         private static HashSet<string> _lastNames = new HashSet<string>();
-        private static bool _baseline;
+        private static bool _baseline, _tracking;
         private static float _next, _last;
         internal const string Key = "apocasaver.cleanup.v2";
         internal static void Protect(GameObject go) { if (go != null) Handled.Add(go.name); }
@@ -39,6 +39,13 @@ namespace Apocasaver
         internal static void Tick(bool playing)
         {
             Protect(HeldItemKeeper.RawHeldItem());
+            if (!Plugin.CleanSaves.Value)
+            {
+                if (_tracking) { _tracking = false; _last = 0; _baseline = false; _lastNames.Clear(); Far.Clear(); }
+                return;
+            }
+            // Disabled time supplies no distance/ownership observations. Start a conservative baseline on enable.
+            if (!_tracking) { _tracking = true; _next = _last = 0; _baseline = false; _lastNames.Clear(); Far.Clear(); }
             float now = Time.realtimeSinceStartup;
             if (now < _next) return; _next = now + 1f;
             float dt = playing && _last > 0 ? Math.Min(1.5f, now - _last) : 0; _last = playing ? now : 0;
@@ -78,29 +85,52 @@ namespace Apocasaver
             }
             return false;
         }
-        private static bool References(HutongGames.PlayMaker.FsmVariables vars, HashSet<GameObject> tree)
+        private static void CollectReferences(HutongGames.PlayMaker.FsmVariables vars, HashSet<GameObject> result)
         {
-            foreach (var v in vars.GameObjectVariables) if (v.Value != null && tree.Contains(v.Value)) return true;
+            foreach (var v in vars.GameObjectVariables) if (v.Value != null) result.Add(v.Value);
             foreach (var v in vars.ObjectVariables)
-            { var go = v.Value as GameObject; var component = v.Value as Component; if (go == null && component != null) go = component.gameObject; if (go != null && tree.Contains(go)) return true; }
+            { var go = v.Value as GameObject; var component = v.Value as Component; if (go == null && component != null) go = component.gameObject; if (go != null) result.Add(go); }
             foreach (var v in vars.ArrayVariables) if (v.Values != null) foreach (var item in v.Values)
-            { var go = item as GameObject; var component = item as Component; if (go == null && component != null) go = component.gameObject; if (go != null && tree.Contains(go)) return true; }
-            return false;
+            { var go = item as GameObject; var component = item as Component; if (go == null && component != null) go = component.gameObject; if (go != null) result.Add(go); }
         }
-        private static bool ReferencedOutside(HashSet<GameObject> tree)
+        private sealed class ReferenceIndex
         {
-            if (References(FsmVariables.GlobalVariables, tree)) return true;
-            foreach (var f in Resources.FindObjectsOfTypeAll<PlayMakerFSM>())
-                if (f != null && f.gameObject.scene.IsValid() && !tree.Contains(f.gameObject) && f.FsmName != "Save_NewGO_ArrayList" &&
-                    References(f.FsmVariables, tree) &&
-                    // Never deserialize actions on an uninitialized FSM. An unknown owner with
-                    // a reference protects the candidate until its persistence can be inspected.
-                    (!f.Fsm.Initialized || f.Fsm.States.Any(s => s.Actions.Any(a => a is ES3PlayMaker.SaveAll)))) return true;
-            foreach (var p in Resources.FindObjectsOfTypeAll<PlayMakerArrayListProxy>())
-                if (p != null && p.gameObject.scene.IsValid() && p.gameObject.name != "NewGO_ArrayList" && !tree.Contains(p.gameObject) && p.arrayList != null)
-                    foreach (var item in p.arrayList) { var go = item as GameObject; if (go != null && tree.Contains(go)) return true; }
-            return false;
+            private readonly HashSet<GameObject> _globals = new HashSet<GameObject>();
+            private readonly Dictionary<GameObject, HashSet<GameObject>> _owners = new Dictionary<GameObject, HashSet<GameObject>>();
+            internal ReferenceIndex()
+            {
+                CollectReferences(FsmVariables.GlobalVariables, _globals);
+                var references = new HashSet<GameObject>();
+                foreach (var f in Resources.FindObjectsOfTypeAll<PlayMakerFSM>())
+                {
+                    if (f == null || !f.gameObject.scene.IsValid() || f.FsmName == "Save_NewGO_ArrayList") continue;
+                    references.Clear(); CollectReferences(f.FsmVariables, references);
+                    // Inspect actions only when initialized and owning references; unknown owners protect them.
+                    if (references.Count == 0 || (f.Fsm.Initialized && !f.Fsm.States.Any(s => s.Actions.Any(a => a is ES3PlayMaker.SaveAll)))) continue;
+                    foreach (var go in references) Add(go, f.gameObject);
+                }
+                foreach (var p in Resources.FindObjectsOfTypeAll<PlayMakerArrayListProxy>())
+                    if (p != null && p.gameObject.scene.IsValid() && p.gameObject.name != "NewGO_ArrayList" && p.arrayList != null)
+                        foreach (var item in p.arrayList) { var go = item as GameObject; if (go != null) Add(go, p.gameObject); }
+            }
+            private void Add(GameObject target, GameObject owner)
+            {
+                HashSet<GameObject> owners;
+                if (!_owners.TryGetValue(target, out owners)) _owners[target] = owners = new HashSet<GameObject>();
+                owners.Add(owner);
+            }
+            internal bool Outside(HashSet<GameObject> tree)
+            {
+                foreach (var go in tree)
+                {
+                    if (_globals.Contains(go)) return true;
+                    HashSet<GameObject> owners;
+                    if (_owners.TryGetValue(go, out owners)) foreach (var owner in owners) if (!tree.Contains(owner)) return true;
+                }
+                return false;
+            }
         }
+        private static bool ReferencedOutside(HashSet<GameObject> tree) { return new ReferenceIndex().Outside(tree); }
         internal sealed class Exclusion
         {
             internal readonly HashSet<GameObject> Objects = new HashSet<GameObject>();
@@ -131,6 +161,7 @@ namespace Apocasaver
         {
             var result = new Exclusion(); if (!Plugin.CleanSaves.Value) return result;
             var player = GameObject.Find("Player"); if (player == null) return result;
+            ReferenceIndex references = null; // Built at most once, only after an eligible candidate is found.
             var markerList = SaveParticipants.Markers;
             if (markerList != null) foreach (var marker in markerList.Cast<object>().ToArray())
             {
@@ -139,13 +170,16 @@ namespace Apocasaver
                 if (!CleanPolicy.Eligible(true, SaveParticipants.Entered(marker), true, Vector3.Distance(car.transform.position, player.transform.position), age)) continue;
                 var graph = new HashSet<GameObject>(); var roots = SaveParticipants.PatrolGraph(marker).ToArray();
                 foreach (var root in roots) foreach (var t in root.GetComponentsInChildren<Transform>(true)) graph.Add(t.gameObject);
-                if (graph.Any(g => Protected(g, true)) || ReferencedOutside(graph)) continue;
+                if (graph.Any(g => Protected(g, true))) continue;
+                if ((references ?? (references = new ReferenceIndex())).Outside(graph)) continue;
                 result.Objects.UnionWith(graph); result.Roots.AddRange(roots);
             }
             foreach (var go in Objects())
             {
                 if (result.Objects.Contains(go)) continue;
                 if (go.transform.parent != null) continue; // retained vehicle/container graphs remain intact
+                float age; Far.TryGetValue(go.name, out age);
+                if (!CleanPolicy.Eligible(Known.Contains(go.name), false, true, Vector3.Distance(go.transform.position, player.transform.position), age)) continue;
                 var fsms = go.GetComponentsInChildren<PlayMakerFSM>(true);
                 string prefab = go.name.Split(new[] { "(Clone)" }, StringSplitOptions.None)[0];
                 bool corpse = prefab == "Zombie_Runner_Dead" && !fsms.Any(f => f.FsmName == "Food" || f.FsmName == "Carcasse");
@@ -155,10 +189,10 @@ namespace Apocasaver
                 bool spent = amount != null && amount.Value <= 0 && sale != null && sale.Value <= 0;
                 bool liveActor = fsms.Any(f => f.FsmName == "Health" && f.FsmVariables.GetFsmFloat("Health") != null && f.FsmVariables.GetFsmFloat("Health").Value > 0);
                 bool patrol = PatrolItems.Contains(go.name) && !liveActor && !fsms.Any(f => f.FsmName == "RpmGear" || f.FsmName == "TrailerAttached");
-                float age; Far.TryGetValue(go.name, out age);
+                if (!corpse && !spent && !patrol) continue;
                 var tree = go.GetComponentsInChildren<Transform>(true).Select(t => t.gameObject).ToArray();
-                if (!CleanPolicy.Eligible(Known.Contains(go.name), tree.Any(g => Protected(g, false)) || ReferencedOutside(new HashSet<GameObject>(tree)), corpse || spent || patrol,
-                    Vector3.Distance(go.transform.position, player.transform.position), age)) continue;
+                if (tree.Any(g => Protected(g, false))) continue;
+                if ((references ?? (references = new ReferenceIndex())).Outside(new HashSet<GameObject>(tree))) continue;
                 result.Objects.UnionWith(tree); result.Roots.Add(go);
             }
             Plugin.Log.LogInfo("CleanSaves planned " + result.Roots.Count + " abandoned root(s), " + result.Objects.Count + " object(s), including patrol assemblies/items when present");
@@ -176,6 +210,7 @@ namespace Apocasaver
         internal static void Load(string encoded)
         {
             Handled.Clear(); Known.Clear(); PatrolItems.Clear(); Far.Clear(); _lastNames.Clear(); _baseline = false; _last = _next = 0;
+            _tracking = Plugin.CleanSaves.Value;
             if (string.IsNullOrEmpty(encoded)) return;
             using (var reader = new BinaryReader(new MemoryStream(Convert.FromBase64String(encoded))))
             {

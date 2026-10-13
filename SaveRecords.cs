@@ -16,6 +16,7 @@ namespace Apocasaver
         private static readonly FieldInfo Sync = typeof(ES3File).GetField("syncWithFile", BindingFlags.Instance | BindingFlags.NonPublic);
         internal static bool Ready { get { return Cache != null && Dirty != null && Sync != null; } }
         internal static Dictionary<string, ES3Data> Data(ES3File file) { return (Dictionary<string, ES3Data>)Cache.GetValue(file); }
+        internal static bool IsDirty(ES3File file) { return (bool)Dirty.GetValue(file); }
         internal static Dictionary<string, ES3Data> Snapshot(string path)
         {
             ES3File file;
@@ -31,7 +32,8 @@ namespace Apocasaver
         {
             var file = new ES3File(new ES3Settings(path) { location = ES3.Location.Cache }, false);
             Sync.SetValue(file, true); // Store the complete cache; do not merge disk keys back into it.
-            foreach (var item in seed) Data(file)[item.Key] = item.Value;
+            var data = Data(file);
+            foreach (var item in seed) data[item.Key] = item.Value;
             Dirty.SetValue(file, dirty); ES3File.cachedFiles[path] = file; return file;
         }
         internal static void MarkDirty(string path) { ES3File file; if (ES3File.cachedFiles.TryGetValue(path, out file)) Dirty.SetValue(file, true); }

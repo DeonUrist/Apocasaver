@@ -217,6 +217,7 @@ namespace Apocasaver
                 if (_kinds.TryGetValue(item.Key, out kind) && kind == RecordKind.History && _history.ContainsKey(item.Key)) continue;
                 _history[item.Key] = item.Value;
             }
+            WorldHistory.HistoryChanged();
         }
         private static void RestoreForNative(Exception error)
         {
@@ -249,6 +250,7 @@ namespace Apocasaver
                 }
                 foreach (string removed in _stageRecords.Keys.Where(k => !written.ContainsKey(k)).ToArray()) { cache.Remove(removed); if (!Active) _history.Remove(removed); }
                 _stageRecords = new Dictionary<string, ES3Data>(written); SaveRecords.MarkDirty(file);
+                if (!Active) WorldHistory.HistoryChanged();
             }
             catch (Exception e) { ReportError(e); }
         }
@@ -274,9 +276,9 @@ namespace Apocasaver
         {
             if (fsm == null || fsm.Name != "SaveLoadGame") return;
             if (state == "LoadGame")
-            { if (Active) Fail("Load interrupted saving", false); _source = null; _loadFile = ES3Settings.defaultSettings.path; SaveHooks.RefreshRoots(CleanWorld.Objects()); }
+            { if (Active) Fail("Load interrupted saving", false); WorldHistory.Reset(); _source = null; _loadFile = ES3Settings.defaultSettings.path; SaveHooks.RefreshRoots(CleanWorld.Objects()); }
             else if (state == "Start" || state == "setSeed")
-            { if (Active) Fail("New game interrupted saving", false); _source = null; _loadFile = null; _history.Clear(); _kinds.Clear(); _world = Guid.NewGuid().ToString("N"); CleanWorld.Load(null); }
+            { if (Active) Fail("New game interrupted saving", false); WorldHistory.Reset(); _source = null; _loadFile = null; _history.Clear(); _kinds.Clear(); _world = Guid.NewGuid().ToString("N"); CleanWorld.Load(null); }
             else if (state == "isPlay" && _loadFile != null)
             {
                 try { LoadSource(_loadFile); }
@@ -288,6 +290,7 @@ namespace Apocasaver
         {
             if (!AutosaveSession.IsSlotFile(file)) return;
             _history = SaveRecords.Snapshot(file); _kinds = new Dictionary<string, RecordKind>();
+            WorldHistory.HistoryChanged();
             try { _kinds = SaveRecords.Decode(RawString(_history, SaveRecords.IndexKey)); }
             catch (Exception e) { Diagnostic("Record index unavailable; retaining records using legacy classification: " + e.Message); }
             try { _world = RawString(_history, SaveRecords.WorldKey) ?? Guid.NewGuid().ToString("N"); }
@@ -299,6 +302,7 @@ namespace Apocasaver
         internal static void CaptureHistory(string key, ES3Data value)
         {
             _history[key] = value; _kinds[key] = RecordKind.History;
+            WorldHistory.HistoryChanged();
             if (Active && _oldHistory != null)
             {
                 _oldHistory[key] = value; _oldKinds[key] = RecordKind.History;
@@ -430,7 +434,7 @@ namespace Apocasaver
         }
         private static void CompleteSuccess(Dictionary<string, RecordKind> index)
         {
-            try { _history = SaveRecords.Snapshot(Target); _kinds = index; _source = Target; }
+            try { _history = SaveRecords.Snapshot(Target); WorldHistory.HistoryChanged(); _kinds = index; _source = Target; }
             catch (Exception e) { _rebuildAvailable = false; Diagnostic("Post-save history unavailable; future saves use native saving: " + e); }
             LastSuccess = true; LastError = null; string file = Target; var exclusion = _exclusion;
             Time.timeScale = _scale; _disk = null; Publishing = false; Target = PatrolStage = null; _paths.Clear();
@@ -481,6 +485,7 @@ namespace Apocasaver
                 tx.Rollback((file, existed, label) => Optional(() => RestoreLabel(file, existed, label), "Restoring slot label"));
                 if (tx.Files[0].Existed) SaveRecords.ReplaceCache(Target, _oldCache, false); else ES3File.cachedFiles.Remove(Target);
                 _history = _oldHistory; _kinds = _oldKinds;
+                WorldHistory.HistoryChanged();
                 if (_exclusion != null) _exclusion.Restore();
                 ES3Settings.defaultSettings.path = _previousPath;
                 foreach (var path in _paths) path.Item1.Value = path.Item2;

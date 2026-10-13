@@ -46,11 +46,10 @@ namespace Apocasaver
 
         internal static int Flush(string file)
         {
-            int n = 0;
             int total = _pending.Count;
-            var saved = new List<string>();
-            foreach (var kv in _pending) if (SaveStore.SaveString(file, kv.Key, kv.Value)) { n++; saved.Add(kv.Key); }
-            foreach (string key in saved) _pending.Remove(key);
+            if (total == 0) return 0;
+            int n = SaveStore.SaveStrings(file, _pending) ? total : 0;
+            if (n == total) _pending.Clear();
             Plugin.Log.LogInfo("Hand poses: wrote " + n + "/" + total + " keys to " + file);
             return n;
         }
@@ -85,26 +84,37 @@ namespace Apocasaver
             return s;
         }
 
-        internal static bool SaveString(string file, string key, string value)
+        internal static bool SaveStrings(string file, IDictionary<string, string> values)
         {
-            if (string.IsNullOrEmpty(file)) return false;
-            bool ok = false;
-            try { ES3.Save<string>(key, value, Settings(file, ES3.Location.Cache)); ok = true; }
-            catch (Exception e) { Plugin.Log.LogWarning("ES3 save (cache) " + key + ": " + e.Message); }
-            try { ES3.Save<string>(key, value, Settings(file, ES3.Location.File)); ok = true; }
-            catch (Exception e) { Plugin.Log.LogWarning("ES3 save (file) " + key + ": " + e.Message); }
-            if (SaveCoordinator.Active)
+            if (string.IsNullOrEmpty(file) || (SaveCoordinator.Active && file != SaveCoordinator.Target)) return false;
+            try
             {
-                try { var cache = Settings(file, ES3.Location.Cache); ok = ES3.KeyExists(key, cache) && ES3.Load<string>(key, cache) == value; }
-                catch { ok = false; }
+                var cache = Settings(file, ES3.Location.Cache);
+                foreach (var item in values) ES3.Save(item.Key, item.Value, cache);
+                foreach (var item in values) if (!ES3.KeyExists(item.Key, cache) || ES3.Load<string>(item.Key, cache) != item.Value) return false;
+                // The coordinator publishes its cache once. Delayed metadata outside a transaction merges disk once.
+                if (!SaveCoordinator.Active)
+                {
+                    var batch = new ES3File(Settings(file, ES3.Location.File), true);
+                    foreach (var item in values) batch.Save(item.Key, item.Value);
+                    batch.Sync();
+                }
+                return true;
             }
-            return ok;
+            catch (Exception e) { Plugin.Log.LogWarning("ES3 hand-pose batch " + file + ": " + e.Message); return false; }
         }
 
         internal static bool TryLoad(string file, string key, out string value)
         {
             value = null;
             if (string.IsNullOrEmpty(file)) return false;
+            if (SaveCoordinator.Active && file == SaveCoordinator.Target)
+            {
+                // The staged disk file predates metadata batched into the current transaction.
+                try { var cache = Settings(file, ES3.Location.Cache); if (ES3.KeyExists(key, cache)) { value = ES3.Load<string>(key, cache); return true; } }
+                catch (Exception e) { Plugin.Log.LogWarning("ES3 load (transaction cache) " + key + ": " + e.Message); }
+                return false;
+            }
             try
             {
                 var fs = Settings(file, ES3.Location.File);
