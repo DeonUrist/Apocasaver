@@ -33,6 +33,18 @@ try {
     foreach ($fieldName in @('cache','dirty','syncWithFile')) {
         if ($null -eq $firstpass.GetType('ES3File').GetField($fieldName, [Reflection.BindingFlags]'Instance,NonPublic')) { throw "Cache field missing: $fieldName" }
     }
+    $terrainAssembly = [Reflection.Assembly]::LoadFrom((Join-Path $managedDir 'Den.Tools.dll'))
+    $pool = $terrainAssembly.GetType('Den.Tools.ObjectsPool+Pool')
+    if ($null -eq $pool) { $pool = [HarmonyLib.AccessTools]::TypeByName('Den.Tools.ObjectsPool+Pool') }
+    if ($null -eq $pool) { throw 'Native terrain pool missing' }
+    $prototype = [HarmonyLib.AccessTools]::Field($pool, 'prototype')
+    if ($null -eq [HarmonyLib.AccessTools]::Field($pool, 'instances') -or $null -eq $prototype -or
+        $null -eq [HarmonyLib.AccessTools]::Field($prototype.FieldType, 'prefab')) { throw 'Native pool prototype fields missing' }
+    $move = [HarmonyLib.AccessTools]::Method($pool, 'MoveItems')
+    $clamp = [HarmonyLib.AccessTools]::Method($pool, 'ClampCount')
+    if (($move.GetParameters().Name -join ',') -ne 'drafts,startNum,endNum' -or
+        ($clamp.GetParameters().Name -join ',') -ne 'targetCount') { throw 'Native terrain batch argument names changed' }
+    Write-Output 'PASS: native terrain batch ranges and prototype-prefab fields verified'
     $runtimeTypes = @(
         @('PlayMaker', 'HutongGames.PlayMaker.Fsm', 'ProcessEvent'),
         @('PlayMaker', 'HutongGames.PlayMaker.Fsm', 'EnterState'),

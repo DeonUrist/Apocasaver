@@ -1,3 +1,14 @@
+# 2.0.4
+
+- Integrate PR #1 by Wad67: remember missing location templates instead of repeatedly searching all loaded objects.
+- Resolve pooled templates from the actual prototype prefab, keep same-name assets distinct, and clear caches on scene/load/new-game transitions. Fallback prefab discovery holds weak references.
+- Reuse the terrain restoration snapshot until history changes; invalidate it if a load callback writes into the scratch cache. Copy operations read the ES3 cache field once.
+- Capture and restore only the native MoveItems range, skip empty batches, and capture only removed instances during ClampCount.
+- Reject cleanup candidates by distance, age, ownership and category before building one reference index for a save. Rebuild references for final validation; uninitialized external owners remain protected.
+- Skip periodic registry/patrol/distance scans while CleanSaves is disabled. Enabling cleanup starts a conservative baseline without counting disabled time.
+- Batch hand-pose metadata into the active save cache or one delayed disk commit, preserve unrelated records, and retain pending poses after a failed delayed write. Transactional reads use the latest cache.
+- Add native Unity performance/correctness regressions for pooling, history snapshots, cache lifetime, cleanup scans and batched metadata.
+
 # 2.0.3
 
 - Keep optional save diagnostics and temporary autosave deferrals in the log. Successful manual saves show "Game saved"; disk failures and backup recovery still show on-screen notices.

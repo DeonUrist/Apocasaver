@@ -42,7 +42,7 @@ public class SaveProbe : BaseUnityPlugin
     [HarmonyPatch(typeof(PlayMakerFSM), "OnEnable")]
     class BlockWorld { static bool Prefix() { return false; } }
 }
-public class NativeSaveRunner : MonoBehaviour
+public partial class NativeSaveRunner : MonoBehaviour
 {
     void Update() { Application.runInBackground = true; }
     const BindingFlags All = BindingFlags.Instance | BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public;
@@ -239,6 +239,7 @@ public class NativeSaveRunner : MonoBehaviour
         Finish(main, player, reg, "SaveGame10.es3");
         Check(SaveCoordinator.LastSuccess && ES3.Load<string>("LateFileOnlyMod", Disk("SaveGame10.es3")) == "after save", "Delayed useful mod state survives the next save in a new slot");
         if (SaveParticipants.PatrolLoaded) PatrolCleanup(main, player, reg, newGo, destination);
+        PerformanceChecks(main, player, reg, newGo, destination);
         _report.Add("PASS: Native ES3 serialization, Harmony save hooks, transaction commit and rollback completed.");
     }
     void Finish(PlayMakerFSM main, PlayMakerFSM player, PlayMakerFSM reg, string slot, System.Action beforeTick = null)

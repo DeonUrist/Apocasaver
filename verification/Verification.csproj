@@ -7,6 +7,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Remove="NativeChecks.cs" />
+    <Compile Remove="NativePerformanceChecks.cs" />
     <Compile Include="..\AutosaveSession.cs" Link="AutosaveSession.cs" />
     <Compile Include="..\PocketInventoryView.cs" Link="PocketInventoryView.cs" />
     <Compile Include="..\SaveDiskTransaction.cs" Link="SaveDiskTransaction.cs" />
