@@ -16,6 +16,8 @@ namespace Apocasaver
         private static Exception _error;
         private static bool _installed;
         private static readonly Dictionary<string, PlayMakerFSM> Templates = new Dictionary<string, PlayMakerFSM>();
+        // loaded prefab roots by name (first one found wins), refreshed only when a name isn't in it
+        private static readonly Dictionary<string, GameObject> Prefabs = new Dictionary<string, GameObject>();
         internal static void Install()
         {
             if (_installed) return;
@@ -71,9 +73,12 @@ namespace Apocasaver
             string relative = ""; for (var t = fsm.transform; t != null && t != root.transform; t = t.parent) relative = "/" + t.name + relative;
             string baseName = root.name.Split(new[] { "(Clone)" }, StringSplitOptions.None)[0], key = baseName + relative + "/" + fsm.FsmName;
             PlayMakerFSM template;
-            if (!Templates.TryGetValue(key, out template) || template == null)
+            // A template found missing is remembered as missing: looking again means going through every loaded object.
+            // Misses are routine: a saveable FSM on a child put under the site at runtime (a spawned crate, a mod's
+            // object) has no counterpart in the prefab, so every pooled instance of that site missed again.
+            if (!Templates.TryGetValue(key, out template) || (!ReferenceEquals(template, null) && template == null))
             {
-                var prefab = Resources.FindObjectsOfTypeAll<GameObject>().FirstOrDefault(g => g != null && !g.scene.IsValid() && g.transform.parent == null && g.name == baseName);
+                var prefab = Prefab(baseName);
                 var go = prefab == null ? null : relative.Length == 0 ? prefab.transform : prefab.transform.Find(relative.TrimStart('/'));
                 template = go == null ? null : go.GetComponents<PlayMakerFSM>().FirstOrDefault(f => f.FsmName == fsm.FsmName);
                 Templates[key] = template;
@@ -82,6 +87,15 @@ namespace Apocasaver
             foreach (var v in fsm.FsmVariables.IntVariables) { var def = template.FsmVariables.GetFsmInt(v.Name); if (def != null) v.Value = def.Value; }
             foreach (var v in fsm.FsmVariables.FloatVariables) { var def = template.FsmVariables.GetFsmFloat(v.Name); if (def != null) v.Value = def.Value; }
             foreach (var v in fsm.FsmVariables.BoolVariables) { var def = template.FsmVariables.GetFsmBool(v.Name); if (def != null) v.Value = def.Value; }
+        }
+        private static GameObject Prefab(string name)
+        {
+            GameObject prefab;
+            if (Prefabs.TryGetValue(name, out prefab) && prefab != null) return prefab;
+            Prefabs.Clear();
+            foreach (var g in Resources.FindObjectsOfTypeAll<GameObject>())
+                if (g != null && !g.scene.IsValid() && g.transform.parent == null && !Prefabs.ContainsKey(g.name)) Prefabs[g.name] = g;
+            return Prefabs.TryGetValue(name, out prefab) ? prefab : null;
         }
         private static void Run(PlayMakerFSM[] fsms, string evt, bool restoring)
         {
